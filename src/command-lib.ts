@@ -242,7 +242,22 @@ export const command = <I extends InputsRecord = {}, E = never, R = never>(
         caller,
         interaction: ix.interaction,
       })
-      .pipe(Effect.map(toResponse));
+      .pipe(
+        Effect.map(toResponse),
+        // Safety net: an unhandled failure still replies (Discord shows
+        // "application did not respond" otherwise) and is logged.
+        Effect.catchAllCause((cause) =>
+          Effect.zipRight(
+            Effect.logError("Command failed", cause),
+            Effect.succeed(
+              toResponse({
+                content: "⚠️ Something went wrong running that command.",
+                ephemeral: true,
+              }),
+            ),
+          ),
+        ),
+      );
   };
 
   return Ix.global(
@@ -270,14 +285,28 @@ const DiscordLayer = DiscordLive.pipe(
   ]),
 );
 
+// The union of every command's service requirements. Mapping per-element and
+// then indexing with [number] yields a union (e.g. Trading | Prices) rather than
+// the intersection a single inferred generic would produce.
+type CommandRequirements<
+  Defs extends ReadonlyArray<Ix.InteractionDefinition<any, any>>,
+> = {
+  [K in keyof Defs]: Defs[K] extends Ix.InteractionDefinition<infer R, any>
+    ? R
+    : never;
+}[number];
+
 /**
  * Builds the layer that registers every command and runs the bot. Any services
  * your commands' `execute` functions use (e.g. the database) remain required
  * inputs of this layer — provide them where you launch it (see index.ts).
  */
-export const commandsLayer = <R, E>(
-  commands: ReadonlyArray<Ix.InteractionDefinition<R, E>>,
-) => {
+export const commandsLayer = <
+  Defs extends ReadonlyArray<Ix.InteractionDefinition<any, any>>,
+>(
+  commands: Defs,
+): Layer.Layer<never, never, CommandRequirements<Defs>> => {
+  type R = CommandRequirements<Defs>;
   const interactions = Effect.suspend(() => {
     // The builder is plain data; its precise generics aren't worth threading
     // through here, so we keep this glue loose and restore the honest type on
@@ -300,5 +329,5 @@ export const commandsLayer = <R, E>(
 
   return Layer.scopedDiscard(Effect.forkScoped(interactions)).pipe(
     Layer.provide(DiscordLayer),
-  );
+  ) as Layer.Layer<never, never, R>;
 };
