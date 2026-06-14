@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Effect-TS/language-service/refs/heads/main/schema.json",
+  "compilerOptions": {
+    "plugins": [
+      {
+        "name": "@effect/language-service"
+      }
+    ],
+
+    // Build performance
+    "incremental": true,
+
+    // Module system (bundled app — run through tsx/esbuild, type-checked only).
+    // "preserve" + "bundler" lets the runtime handle modules and resolves
+    // packages via their exports map without forcing CJS/ESM resolution-mode
+    // splits (which otherwise give drizzle-orm two incompatible type identities).
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+
+    // Import handling
+    "verbatimModuleSyntax": true,
+
+    // Type safety
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+
+    // Development
+    "sourceMap": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src"]
+}
