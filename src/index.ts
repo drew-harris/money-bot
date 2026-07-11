@@ -10,17 +10,10 @@ import { DatabaseLive } from "./db.js";
 import { Prices } from "./prices.js";
 import { Trading } from "./trading.js";
 
-Dotenv.config({ quiet: true });
+Dotenv.config({ quiet: false });
 
-// Register every command here. To add one, write it in src/commands/ and add it
-// to this list — nothing else in this file needs to change.
 const Commands = commandsLayer([balance, buy, sell, price]);
 
-// Wire the commands to the services they use:
-//   - Trading: account/buy/sell/portfolio logic
-//   - DatabaseLive: SQLite + Drizzle (runs migrations on startup)
-//   - Prices: live stock quotes
-// Trading itself needs the database and prices, so they're provided beneath it.
 const MainLive = Commands.pipe(
   Layer.provide(Trading.Default),
   Layer.provide(Layer.mergeAll(DatabaseLive, Prices.Default)),

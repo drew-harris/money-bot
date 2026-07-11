@@ -108,7 +108,13 @@ const makeTrading = Effect.gen(function* () {
         priceCents: quote.priceCents,
       });
 
-      return { symbol, quantity, priceCents: quote.priceCents, costCents, cashCents };
+      return {
+        symbol,
+        quantity,
+        priceCents: quote.priceCents,
+        costCents,
+        cashCents,
+      };
     });
 
   const sell = (userId: string, rawSymbol: string, quantity: number) =>
@@ -119,7 +125,10 @@ const makeTrading = Effect.gen(function* () {
       const symbol = rawSymbol.trim().toUpperCase();
       yield* ensureAccount(userId);
 
-      const where = and(eq(holdings.userId, userId), eq(holdings.symbol, symbol));
+      const where = and(
+        eq(holdings.userId, userId),
+        eq(holdings.symbol, symbol),
+      );
       const existingRows = yield* db.select().from(holdings).where(where);
       const existing = existingRows[0];
       if (!existing || existing.quantity < quantity) {
