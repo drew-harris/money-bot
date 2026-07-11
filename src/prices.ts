@@ -1,7 +1,3 @@
-import { HttpClient, HttpClientResponse } from "@effect/platform";
-import { NodeHttpClient } from "@effect/platform-node";
-import { Data, Effect, Schema } from "effect";
-
 /** A live quote for a stock, with the price as integer cents. */
 export interface Quote {
   readonly symbol: string;
@@ -9,96 +5,148 @@ export interface Quote {
   readonly currency: string;
 }
 
+export interface Prices {
+  readonly quote: (symbol: string) => Promise<Quote>;
+}
+
 /** The given ticker doesn't exist (or has no current price). */
-export class UnknownSymbol extends Data.TaggedError("UnknownSymbol")<{
-  readonly symbol: string;
-}> {}
+export class UnknownSymbol extends Error {
+  readonly code = "UnknownSymbol";
+
+  constructor(readonly symbol: string) {
+    super(`Unknown stock symbol: ${symbol}`);
+    this.name = "UnknownSymbol";
+  }
+}
 
 /** The price provider could not be reached or returned something unexpected. */
-export class PriceUnavailable extends Data.TaggedError("PriceUnavailable")<{
-  readonly symbol: string;
-  readonly cause: unknown;
-}> {}
+export class PriceUnavailable extends Error {
+  readonly code = "PriceUnavailable";
 
-// Schema for the bits of Yahoo's chart response we actually read. Unlisted
-// fields are ignored, and a malformed body fails parsing (→ PriceUnavailable).
-const YahooChart = Schema.Struct({
-  chart: Schema.Struct({
-    result: Schema.NullishOr(
-      Schema.Array(
-        Schema.Struct({
-          meta: Schema.Struct({
-            symbol: Schema.optional(Schema.String),
-            regularMarketPrice: Schema.optional(Schema.Number),
-            currency: Schema.optional(Schema.String),
-          }),
-          indicators: Schema.optional(
-            Schema.Struct({
-              quote: Schema.Array(
-                Schema.Struct({
-                  close: Schema.Array(Schema.NullishOr(Schema.Number)),
-                }),
-              ),
-            }),
-          ),
-        }),
-      ),
-    ),
-  }),
-});
+  constructor(
+    readonly symbol: string,
+    cause: unknown,
+  ) {
+    super(`Price unavailable for ${symbol}`, { cause });
+    this.name = "PriceUnavailable";
+  }
+}
 
-const makePrices = Effect.gen(function* () {
-  const client = yield* HttpClient.HttpClient;
+interface YahooResult {
+  readonly meta: {
+    readonly symbol?: string;
+    readonly regularMarketPrice?: number;
+    readonly currency?: string;
+  };
+  readonly indicators?: {
+    readonly quote: ReadonlyArray<{
+      readonly close: ReadonlyArray<number | null | undefined>;
+    }>;
+  };
+}
 
-  const quote = (rawSymbol: string) =>
-    Effect.gen(function* () {
-      const symbol = rawSymbol.trim().toUpperCase();
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-        symbol,
-      )}?interval=1m&range=1d&includePrePost=true`;
+const parseYahooResult = (value: unknown): YahooResult | undefined => {
+  if (typeof value !== "object" || value === null || !("chart" in value)) {
+    throw new TypeError("Yahoo response is missing chart data");
+  }
+  const chart = value.chart;
+  if (typeof chart !== "object" || chart === null || !("result" in chart)) {
+    throw new TypeError("Yahoo response has invalid chart data");
+  }
+  const result = chart.result;
+  if (result == null) return undefined;
+  if (!Array.isArray(result)) {
+    throw new TypeError("Yahoo chart result is not an array");
+  }
+  const first: unknown = result[0];
+  if (first === undefined) return undefined;
+  if (typeof first !== "object" || first === null || !("meta" in first)) {
+    throw new TypeError("Yahoo chart result is missing metadata");
+  }
+  const meta = first.meta;
+  if (typeof meta !== "object" || meta === null) {
+    throw new TypeError("Yahoo chart metadata is invalid");
+  }
 
-      const body = yield* client
-        .get(url, {
-          // Yahoo rejects requests without a browser-like User-Agent.
-          headers: { "User-Agent": "Mozilla/5.0 (paper-trading-bot)" },
-        })
-        .pipe(
-          // Decode + validate the JSON body against the schema.
-          Effect.flatMap(HttpClientResponse.schemaBodyJson(YahooChart)),
-          // Network/parse failures become a single, friendly error type.
-          Effect.mapError((cause) => new PriceUnavailable({ symbol, cause })),
-        );
+  const record = first as Record<string, unknown>;
+  const indicators = record.indicators;
+  if (indicators !== undefined) {
+    if (
+      typeof indicators !== "object" ||
+      indicators === null ||
+      !("quote" in indicators) ||
+      !Array.isArray(indicators.quote)
+    ) {
+      throw new TypeError("Yahoo chart indicators are invalid");
+    }
+    const quote = indicators.quote[0];
+    if (
+      quote !== undefined &&
+      (typeof quote !== "object" ||
+        quote === null ||
+        !("close" in quote) ||
+        !Array.isArray(quote.close) ||
+        quote.close.some(
+          (item: unknown) =>
+            item !== null && item !== undefined && typeof item !== "number",
+        ))
+    ) {
+      throw new TypeError("Yahoo chart closes are invalid");
+    }
+  }
 
-      const meta = body.chart.result?.[0]?.meta;
-      const closes = body.chart.result?.[0]?.indicators?.quote[0]?.close;
-      // The final intraday close includes pre- and post-market data, which is
-      // also the freshest available price during weekends and other closures.
-      const price =
-        Array.from(closes ?? [])
-          .reverse()
-          .find((close) => typeof close === "number") ??
-        meta?.regularMarketPrice;
-      if (!meta || typeof price !== "number") {
-        return yield* new UnknownSymbol({ symbol });
+  for (const key of ["symbol", "currency"] as const) {
+    const field = (meta as Record<string, unknown>)[key];
+    if (field !== undefined && typeof field !== "string") {
+      throw new TypeError(`Yahoo metadata ${key} is invalid`);
+    }
+  }
+  const marketPrice = (meta as Record<string, unknown>).regularMarketPrice;
+  if (marketPrice !== undefined && typeof marketPrice !== "number") {
+    throw new TypeError("Yahoo market price is invalid");
+  }
+
+  return first as YahooResult;
+};
+
+export const createPrices = (
+  fetch_: typeof fetch = globalThis.fetch,
+  timeoutMs = 10_000,
+): Prices => ({
+  quote: async (rawSymbol) => {
+    const symbol = rawSymbol.trim().toUpperCase();
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+      symbol,
+    )}?interval=1m&range=1d&includePrePost=true`;
+
+    let result: YahooResult | undefined;
+    try {
+      const response = await fetch_(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (paper-trading-bot)" },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!response.ok) {
+        throw new Error(`Yahoo returned HTTP ${response.status}`);
       }
+      result = parseYahooResult(await response.json());
+    } catch (cause) {
+      throw new PriceUnavailable(symbol, cause);
+    }
 
-      return {
-        symbol: meta.symbol ?? symbol,
-        priceCents: Math.round(price * 100),
-        currency: meta.currency ?? "USD",
-      } satisfies Quote;
-    });
+    const closes = result?.indicators?.quote[0]?.close;
+    const price =
+      Array.from(closes ?? [])
+        .reverse()
+        .find((close) => typeof close === "number") ??
+      result?.meta.regularMarketPrice;
+    if (!result || typeof price !== "number") {
+      throw new UnknownSymbol(symbol);
+    }
 
-  return { quote } as const;
+    return {
+      symbol: result.meta.symbol ?? symbol,
+      priceCents: Math.round(price * 100),
+      currency: result.meta.currency ?? "USD",
+    };
+  },
 });
-
-/**
- * Stock price lookups. Backed by Yahoo Finance's public chart endpoint, which
- * needs no API key. Swap the implementation here to change providers — nothing
- * else in the app depends on Yahoo.
- */
-export class Prices extends Effect.Service<Prices>()("app/Prices", {
-  effect: makePrices,
-  // The provider brings its own HTTP client, so callers just provide Prices.Default.
-  dependencies: [NodeHttpClient.layerUndici],
-}) {}

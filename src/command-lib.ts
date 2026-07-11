@@ -1,122 +1,48 @@
-/**
- * command-lib — a tiny façade over dfx for declaring Discord slash commands.
- *
- * To add a command you describe four things and nothing else:
- *
- *   - name:        what users type after "/"
- *   - description: shown in Discord's command picker
- *   - inputs:      (optional) the typed arguments the command accepts
- *   - execute:     an Effect that receives the parsed inputs and returns a reply
- *
- * Everything below those four — option-type integers, the response envelope,
- * reading raw option values, the gateway connection, and the Effect layers —
- * is handled in this file. A command author never imports `dfx` directly.
- *
- * Minimal example:
- *
- *   export const ping = command({
- *     name: "ping",
- *     description: "Check the bot is alive",
- *     execute: () => Effect.succeed("Pong!"),
- *   })
- *
- * With inputs and a service (see commands/ for more):
- *
- *   export const greet = command({
- *     name: "greet",
- *     description: "Greet someone",
- *     inputs: { who: input.string("Who to greet") },
- *     execute: ({ who }) => Effect.succeed(`Hello, ${who}!`),
- *   })
- */
-import { NodeHttpClient, NodeSocket } from "@effect/platform-node";
-import { Discord, DiscordConfig, Ix } from "dfx";
-import type { DiscordGateway } from "dfx/DiscordGateway";
-import type { DiscordREST } from "dfx/DiscordREST";
-import type { CommandHelper } from "dfx/Interactions/commandHelper";
-import { DiscordLive, runIx } from "dfx/gateway";
-import { Config, Effect, HashMap, Layer, Option } from "effect";
+import {
+  ApplicationCommandOptionType,
+  Client,
+  Events,
+  GatewayIntentBits,
+  MessageFlags,
+  MessageFlagsBitField,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  type ChatInputCommandInteraction,
+  type InteractionEditReplyOptions,
+  type InteractionReplyOptions,
+  type MessageFlagsResolvable,
+  type User,
+} from "discord.js";
+import type { Prices } from "./prices.js";
+import type { Trading } from "./trading.js";
 
-// ---------------------------------------------------------------------------
-// Replies
-// ---------------------------------------------------------------------------
-
-/** A single rich embed. Has typed `title`, `description`, `color`, `fields`, ... */
-export type Embed = Discord.RichEmbed;
-
-/**
- * A reply with full control over the message: `content`, `embeds`, `components`,
- * `attachments`, `poll`, `tts`, etc. — every field Discord accepts, fully typed.
- * Return a plain string instead when you only need text.
- *
- *   return {
- *     embeds: [{ title: "Balance", description: "$100", color: 0x57f287 }],
- *     ephemeral: true,
- *   }
- */
-export interface Reply extends Discord.IncomingWebhookInteractionRequest {
-  /**
-   * When true, only the user who ran the command can see the reply. Sugar for
-   * the Discord ephemeral message flag; combine freely with `content`/`embeds`.
-   */
-  readonly ephemeral?: boolean;
-}
-
-/** What an `execute` may return: plain text, or a {@link Reply} for more control. */
+export type Embed = NonNullable<InteractionReplyOptions["embeds"]>[number];
+export type Reply = InteractionReplyOptions & { readonly ephemeral?: boolean };
 export type ReplyResult = string | Reply;
 
-// Discord message flag marking a reply as ephemeral (visible only to the caller).
-const EPHEMERAL_FLAG = Discord.MessageFlags.Ephemeral;
+const resolveReplyFlags = (flags: InteractionReplyOptions["flags"]) =>
+  MessageFlagsBitField.resolve((flags ?? 0) as MessageFlagsResolvable);
 
-const toResponse = (
-  reply: ReplyResult,
-): Discord.CreateInteractionResponseRequest => {
-  const data: Discord.IncomingWebhookInteractionRequest =
-    typeof reply === "string"
-      ? { content: reply }
-      : (() => {
-          // Fold our `ephemeral` sugar into the real `flags` bitfield, leaving
-          // every other Discord field (embeds, components, ...) untouched.
-          const { ephemeral, flags, ...rest } = reply;
-          return ephemeral || flags != null
-            ? {
-                ...rest,
-                flags: (flags ?? 0) | (ephemeral ? EPHEMERAL_FLAG : 0),
-              }
-            : rest;
-        })();
-  return Ix.response({
-    type: Discord.InteractionCallbackTypes.CHANNEL_MESSAGE_WITH_SOURCE,
-    data,
-  });
-};
-
-// ---------------------------------------------------------------------------
-// Inputs
-// ---------------------------------------------------------------------------
-
-/**
- * A single command argument. You never construct these directly — use the
- * {@link input} helpers (`input.string(...)`, `input.user(...)`, ...).
- */
-export interface Input<out V> {
-  readonly optionType: Discord.ApplicationCommandOptionType;
-  readonly description: string;
-  readonly required: boolean;
-  /** Reads this argument's value out of an incoming interaction. */
-  readonly read: (ix: CommandHelper<any>, name: string) => V;
+export interface CommandServices {
+  readonly prices: Prices;
+  readonly trading: Trading;
 }
 
-// Discord delivers every option value as a string; we parse per input type.
-const rawValue = (ix: CommandHelper<any>, name: string): string | undefined =>
-  Option.getOrUndefined(HashMap.get(ix.optionsMap, name));
+interface Input<V> {
+  readonly optionType: ApplicationCommandOptionType;
+  readonly description: string;
+  readonly required: boolean;
+  readonly read: (interaction: ChatInputCommandInteraction, name: string) => V;
+}
 
-// Builds an `input.*` helper. The overloads make a value required by default and
-// `V | undefined` when `{ required: false }` is passed, so `execute`'s argument
-// types stay accurate without the author thinking about it.
 const makeInput = <V>(
-  optionType: Discord.ApplicationCommandOptionType,
-  parse: (ix: CommandHelper<any>, name: string) => V | undefined,
+  optionType: ApplicationCommandOptionType,
+  read: (
+    interaction: ChatInputCommandInteraction,
+    name: string,
+    required: boolean,
+  ) => V | undefined,
 ) => {
   function build(description: string): Input<V>;
   function build(description: string, options: { required: true }): Input<V>;
@@ -133,210 +59,264 @@ const makeInput = <V>(
       optionType,
       description,
       required,
-      read: (ix, name) => parse(ix, name),
+      read: (interaction, name) => read(interaction, name, required),
     };
   }
   return build;
 };
 
-/** Typed argument builders for the `inputs` of a {@link command}. */
 export const input = {
-  /** A text argument. */
   string: makeInput<string>(
-    Discord.ApplicationCommandOptionType.STRING,
-    (ix, name) => rawValue(ix, name),
+    ApplicationCommandOptionType.String,
+    (ix, name, required) => ix.options.getString(name, required) ?? undefined,
   ),
-  /** A whole-number argument. */
   integer: makeInput<number>(
-    Discord.ApplicationCommandOptionType.INTEGER,
-    (ix, name) => {
-      const value = rawValue(ix, name);
-      return value === undefined ? undefined : Number(value);
-    },
+    ApplicationCommandOptionType.Integer,
+    (ix, name, required) => ix.options.getInteger(name, required) ?? undefined,
   ),
-  /** A decimal-number argument. */
   number: makeInput<number>(
-    Discord.ApplicationCommandOptionType.NUMBER,
-    (ix, name) => {
-      const value = rawValue(ix, name);
-      return value === undefined ? undefined : Number(value);
-    },
+    ApplicationCommandOptionType.Number,
+    (ix, name, required) => ix.options.getNumber(name, required) ?? undefined,
   ),
-  /** A true/false argument. */
   boolean: makeInput<boolean>(
-    Discord.ApplicationCommandOptionType.BOOLEAN,
-    (ix, name) => {
-      const value = rawValue(ix, name);
-      return value === undefined
-        ? undefined
-        : typeof value === "boolean"
-          ? value
-          : value === "true";
-    },
+    ApplicationCommandOptionType.Boolean,
+    (ix, name, required) => ix.options.getBoolean(name, required) ?? undefined,
   ),
-  /** A Discord user argument; resolves to the full user object. */
-  user: makeInput<Discord.UserResponse>(
-    Discord.ApplicationCommandOptionType.USER,
-    (ix, name) =>
-      Option.getOrUndefined(
-        // `resolve`'s typed overloads need the literal command shape (which this
-        // generic façade doesn't carry), so we read it dynamically here.
-        (ix as any).resolve(
-          name,
-          (id: string, data: Discord.InteractionDataResolved) =>
-            data.users?.[id],
-        ),
-      ),
+  user: makeInput<User>(
+    ApplicationCommandOptionType.User,
+    (ix, name, required) => ix.options.getUser(name, required) ?? undefined,
   ),
 } as const;
 
-// ---------------------------------------------------------------------------
-// Commands
-// ---------------------------------------------------------------------------
-
-type InputsRecord = Record<string, Input<any>>;
-
-// Turns an `inputs` record into the `{ name: value }` object passed to execute.
+type InputsRecord = Record<string, Input<unknown>>;
 type InputValues<I extends InputsRecord> = {
   [K in keyof I]: I[K] extends Input<infer V> ? V : never;
 };
 
-/** Per-interaction context passed to `execute` alongside the parsed inputs. */
-export interface CommandContext {
-  /** The Discord user who ran the command. */
-  readonly caller: Discord.UserResponse;
-  /** The raw interaction, for advanced use. */
-  readonly interaction: Discord.APIInteraction;
+export interface CommandContext extends CommandServices {
+  readonly caller: User;
+  readonly interaction: ChatInputCommandInteraction;
 }
 
-export interface CommandConfig<I extends InputsRecord, E, R> {
-  /** The slash command name (what users type after "/"). */
+interface DeferConfig<I extends InputsRecord> {
+  readonly ephemeral?: boolean | ((inputs: InputValues<I>) => boolean);
+}
+
+export interface CommandConfig<I extends InputsRecord> {
   readonly name: string;
-  /** Shown in Discord's command picker. */
   readonly description: string;
-  /** The typed arguments this command accepts. Omit for a command with none. */
   readonly inputs?: I;
-  /**
-   * Runs when the command is invoked. Receives the parsed {@link inputs} and a
-   * {@link CommandContext}. Return a string (or {@link Reply}) to reply, or yield
-   * any service (e.g. the database) from the surrounding Effect.
-   */
+  readonly defer?: boolean | DeferConfig<I>;
   readonly execute: (
     inputs: InputValues<I>,
     context: CommandContext,
-  ) => Effect.Effect<ReplyResult, E, R>;
+  ) => Promise<ReplyResult>;
 }
 
-/** Declare a slash command. Pass the result to {@link commandsLayer}. */
-export const command = <I extends InputsRecord = {}, E = never, R = never>(
-  config: CommandConfig<I, E, R>,
-) => {
-  const inputs = (config.inputs ?? {}) as I;
-  const options = Object.entries(inputs).map(([name, def]) => ({
-    type: def.optionType,
-    name,
-    description: def.description,
-    required: def.required,
-  }));
+export interface Command {
+  readonly name: string;
+  readonly data: ReturnType<SlashCommandBuilder["toJSON"]>;
+  readonly handle: (
+    interaction: ChatInputCommandInteraction,
+    services: CommandServices,
+  ) => Promise<void>;
+}
 
-  const handle = (ix: CommandHelper<any>) => {
-    const values: Record<string, unknown> = {};
-    for (const [name, def] of Object.entries(inputs)) {
-      values[name] = def.read(ix, name);
-    }
-    const caller = (ix.interaction.member?.user ??
-      ix.interaction.user)! as Discord.UserResponse;
-    return config
-      .execute(values as InputValues<I>, {
-        caller,
-        interaction: ix.interaction,
-      })
-      .pipe(
-        Effect.map(toResponse),
-        // Safety net: an unhandled failure still replies (Discord shows
-        // "application did not respond" otherwise) and is logged.
-        Effect.catchAllCause((cause) =>
-          Effect.zipRight(
-            Effect.logError("Command failed", cause),
-            Effect.succeed(
-              toResponse({
-                content: "⚠️ Something went wrong running that command.",
-                ephemeral: true,
-              }),
-            ),
-          ),
-        ),
-      );
+const replyOptions = (reply: ReplyResult): InteractionReplyOptions => {
+  const value: Reply = typeof reply === "string" ? { content: reply } : reply;
+  const { ephemeral, flags, allowedMentions, ...rest } = value;
+  return {
+    ...rest,
+    allowedMentions: allowedMentions ?? { parse: [] },
+    ...(ephemeral || flags !== undefined
+      ? {
+          flags:
+            resolveReplyFlags(flags) | (ephemeral ? MessageFlags.Ephemeral : 0),
+        }
+      : {}),
   };
-
-  return Ix.global(
-    {
-      name: config.name,
-      description: config.description,
-      ...(options.length > 0 ? { options } : {}),
-    } as Discord.ApplicationCommandCreateRequest,
-    handle,
-  );
 };
 
-// ---------------------------------------------------------------------------
-// Wiring (handled for you)
-// ---------------------------------------------------------------------------
+const sendReply = async (
+  interaction: ChatInputCommandInteraction,
+  reply: ReplyResult,
+) => {
+  const options = replyOptions(reply);
+  const resolvedFlags = resolveReplyFlags(options.flags);
+  const ephemeral = (resolvedFlags & MessageFlags.Ephemeral) !== 0;
+  if (!interaction.deferred && !interaction.replied) {
+    await interaction.reply(options);
+    return;
+  }
+  if (interaction.deferred && interaction.ephemeral !== ephemeral) {
+    await interaction.deleteReply();
+    await interaction.followUp(options);
+    return;
+  }
+  const { flags: _, ...editOptions } = options;
+  void _;
+  const editableFlags =
+    resolvedFlags & (MessageFlags.SuppressEmbeds | MessageFlags.IsComponentsV2);
+  await interaction.editReply({
+    ...editOptions,
+    ...(editableFlags ? { flags: editableFlags } : {}),
+  } as InteractionEditReplyOptions);
+};
 
-// The Discord gateway + REST connection, configured from DISCORD_BOT_TOKEN.
-const DiscordLayer = DiscordLive.pipe(
-  Layer.provide([
-    DiscordConfig.layerConfig({
-      token: Config.redacted("DISCORD_BOT_TOKEN"),
-    }),
-    NodeHttpClient.layerUndici,
-    NodeSocket.layerWebSocketConstructor,
-  ]),
-);
-
-// The union of every command's service requirements. Mapping per-element and
-// then indexing with [number] yields a union (e.g. Trading | Prices) rather than
-// the intersection a single inferred generic would produce.
-type CommandRequirements<
-  Defs extends ReadonlyArray<Ix.InteractionDefinition<any, any>>,
-> = {
-  [K in keyof Defs]: Defs[K] extends Ix.InteractionDefinition<infer R, any>
-    ? R
-    : never;
-}[number];
-
-/**
- * Builds the layer that registers every command and runs the bot. Any services
- * your commands' `execute` functions use (e.g. the database) remain required
- * inputs of this layer — provide them where you launch it (see index.ts).
- */
-export const commandsLayer = <
-  Defs extends ReadonlyArray<Ix.InteractionDefinition<any, any>>,
->(
-  commands: Defs,
-): Layer.Layer<never, never, CommandRequirements<Defs>> => {
-  type R = CommandRequirements<Defs>;
-  const interactions = Effect.suspend(() => {
-    // The builder is plain data; its precise generics aren't worth threading
-    // through here, so we keep this glue loose and restore the honest type on
-    // the way out (the handler requirements `R` are what callers must satisfy).
-    let builder: any = Ix.builder;
-    for (const definition of commands) {
-      builder = builder.add(definition);
-    }
-    // Log any failure from a handler instead of letting it crash the bot.
-    const logFailures = (effect: Effect.Effect<void, any, any>) =>
-      Effect.catchAllCause(effect, (cause) =>
-        Effect.logError("Interaction handler failed", cause),
+const addOption = (
+  builder: SlashCommandBuilder,
+  name: string,
+  definition: Input<unknown>,
+) => {
+  const configure = <
+    T extends {
+      setName(name: string): T;
+      setDescription(description: string): T;
+      setRequired(required: boolean): T;
+    },
+  >(
+    option: T,
+  ) =>
+    option
+      .setName(name)
+      .setDescription(definition.description)
+      .setRequired(definition.required);
+  switch (definition.optionType) {
+    case ApplicationCommandOptionType.String:
+      builder.addStringOption(configure);
+      break;
+    case ApplicationCommandOptionType.Integer:
+      builder.addIntegerOption(configure);
+      break;
+    case ApplicationCommandOptionType.Number:
+      builder.addNumberOption(configure);
+      break;
+    case ApplicationCommandOptionType.Boolean:
+      builder.addBooleanOption(configure);
+      break;
+    case ApplicationCommandOptionType.User:
+      builder.addUserOption(configure);
+      break;
+    default:
+      throw new Error(
+        `Unsupported command option type: ${definition.optionType}`,
       );
-    return (runIx as any)(logFailures)(builder) as Effect.Effect<
-      never,
-      never,
-      R | DiscordGateway | DiscordREST
-    >;
-  });
+  }
+};
 
-  return Layer.scopedDiscard(Effect.forkScoped(interactions)).pipe(
-    Layer.provide(DiscordLayer),
-  ) as Layer.Layer<never, never, R>;
+export const command = <I extends InputsRecord = Record<never, never>>(
+  config: CommandConfig<I>,
+): Command => {
+  const inputs = (config.inputs ?? {}) as I;
+  const builder = new SlashCommandBuilder()
+    .setName(config.name)
+    .setDescription(config.description);
+  for (const [name, definition] of Object.entries(inputs)) {
+    addOption(builder, name, definition);
+  }
+
+  return {
+    name: config.name,
+    data: builder.toJSON(),
+    handle: async (interaction, services) => {
+      try {
+        const values: Record<string, unknown> = {};
+        for (const [name, definition] of Object.entries(inputs)) {
+          values[name] = definition.read(interaction, name);
+        }
+        const typedValues = values as InputValues<I>;
+        if (config.defer) {
+          const defer = typeof config.defer === "object" ? config.defer : {};
+          const ephemeral =
+            typeof defer.ephemeral === "function"
+              ? defer.ephemeral(typedValues)
+              : (defer.ephemeral ?? false);
+          await interaction.deferReply({
+            ...(ephemeral ? { flags: MessageFlags.Ephemeral } : {}),
+          });
+        }
+        const reply = await config.execute(typedValues, {
+          ...services,
+          caller: interaction.user,
+          interaction,
+        });
+        await sendReply(interaction, reply);
+      } catch (error) {
+        console.error("Command failed", {
+          command: interaction.commandName,
+          interactionId: interaction.id,
+          userId: interaction.user.id,
+          error,
+        });
+        try {
+          await sendReply(interaction, {
+            content: "Something went wrong running that command.",
+            ephemeral: true,
+          });
+        } catch (replyError) {
+          console.error("Failed to send command error response", {
+            interactionId: interaction.id,
+            error: replyError,
+          });
+        }
+      }
+    },
+  };
+};
+
+export const createDiscordClient = (
+  commands: ReadonlyArray<Command>,
+  services: CommandServices,
+) => {
+  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+  const commandsByName = new Map(commands.map((item) => [item.name, item]));
+  const activeHandlers = new Set<Promise<void>>();
+  client.on(Events.InteractionCreate, (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
+    const definition = commandsByName.get(interaction.commandName);
+    if (!definition) {
+      void interaction
+        .reply({
+          content: "That command is no longer available.",
+          flags: MessageFlags.Ephemeral,
+        })
+        .catch((error) =>
+          console.error("Failed to reject unknown command", {
+            interactionId: interaction.id,
+            error,
+          }),
+        );
+      return;
+    }
+    const handler = definition.handle(interaction, services);
+    activeHandlers.add(handler);
+    void handler.finally(() => activeHandlers.delete(handler));
+  });
+  client.on(Events.Error, (error) =>
+    console.error("Discord client error", error),
+  );
+  client.on(Events.ShardError, (error, shardId) =>
+    console.error("Discord shard error", { shardId, error }),
+  );
+  client.once(Events.ClientReady, (readyClient) => {
+    console.info(`Discord ready as ${readyClient.user.tag}`);
+  });
+  return {
+    client,
+    drain: async () => {
+      await Promise.allSettled(activeHandlers);
+    },
+  };
+};
+
+export const deployCommands = async (
+  commands: ReadonlyArray<Command>,
+  token: string,
+  clientId: string,
+) => {
+  const rest = new REST({ version: "10" }).setToken(token);
+  await rest.put(Routes.applicationCommands(clientId), {
+    body: commands.map(({ data }) => data),
+  });
+  console.info(`Deployed ${commands.length} global commands`);
 };

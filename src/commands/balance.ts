@@ -1,7 +1,6 @@
-import { Effect } from "effect";
 import { command, input } from "../command-lib.js";
-import { usd } from "../format.js";
-import { Trading } from "../trading.js";
+import { embedDescription, usd } from "../format.js";
+import { PriceUnavailable, UnknownSymbol } from "../prices.js";
 
 // Shows a user's cash, every position valued at the current market price,
 // and total net worth. Everyone starts at $10,000 the first time they trade.
@@ -14,11 +13,11 @@ export const balance = command({
       required: false,
     }),
   },
-  execute: ({ user, ephemeral }, { caller }) =>
-    Effect.gen(function* () {
-      const trading = yield* Trading;
+  defer: { ephemeral: ({ ephemeral }) => ephemeral ?? false },
+  execute: async ({ user, ephemeral }, { caller, trading }) => {
+    try {
       const portfolioUser = user ?? caller;
-      const p = yield* trading.portfolio(portfolioUser.id);
+      const p = await trading.portfolio(portfolioUser.id);
 
       const holdings = p.positions.length
         ? p.positions
@@ -35,7 +34,7 @@ export const balance = command({
           {
             title: `${portfolioUser.username}'s portfolio`,
             color: 0x5865f2,
-            description: holdings,
+            description: embedDescription(holdings),
             fields: [
               {
                 name: "Cash",
@@ -51,18 +50,20 @@ export const balance = command({
           },
         ],
       };
-    }).pipe(
-      Effect.catchTags({
-        UnknownSymbol: (e) =>
-          Effect.succeed({
-            content: `One of your holdings (**${e.symbol}**) couldn't be priced right now. Try again shortly.`,
-            ephemeral: true,
-          }),
-        PriceUnavailable: (e) =>
-          Effect.succeed({
-            content: `Couldn't fetch a price for **${e.symbol}** right now. Try again shortly.`,
-            ephemeral: true,
-          }),
-      }),
-    ),
+    } catch (error) {
+      if (error instanceof UnknownSymbol) {
+        return {
+          content: `One of your holdings (**${error.symbol}**) couldn't be priced right now. Try again shortly.`,
+          ephemeral: true,
+        };
+      }
+      if (error instanceof PriceUnavailable) {
+        return {
+          content: `Couldn't fetch a price for **${error.symbol}** right now. Try again shortly.`,
+          ephemeral: true,
+        };
+      }
+      throw error;
+    }
+  },
 });

@@ -1,34 +1,48 @@
-import { NodeRuntime } from "@effect/platform-node";
-import { Layer } from "effect";
-import { commandsLayer } from "./command-lib.js";
-import { balance } from "./commands/balance.js";
-import { buy } from "./commands/buy.js";
-import { liquidate } from "./commands/liquidate.js";
-import { leaderboard } from "./commands/leaderboard.js";
-import { man } from "./commands/man.js";
-import { pay } from "./commands/pay.js";
-import { price } from "./commands/price.js";
-import { sell } from "./commands/sell.js";
-import { stockinfo } from "./commands/stockinfo.js";
-import { DatabaseLive } from "./db.js";
-import { Prices } from "./prices.js";
-import { Trading } from "./trading.js";
+import { createDiscordClient } from "./command-lib.js";
+import { commands } from "./commands.js";
+import { requiredEnvironment } from "./config.js";
+import { openDatabase } from "./db.js";
+import { createPrices } from "./prices.js";
+import { createTrading } from "./trading.js";
 
-const Commands = commandsLayer([
-  balance,
-  buy,
-  man,
-  sell,
-  liquidate,
-  leaderboard,
-  pay,
-  price,
-  stockinfo,
-]);
+const main = async () => {
+  const token = requiredEnvironment("DISCORD_BOT_TOKEN");
+  const database = openDatabase();
+  const prices = createPrices();
+  const trading = createTrading(database.db, prices);
+  const discord = createDiscordClient(commands, { prices, trading });
+  let shuttingDown = false;
 
-const MainLive = Commands.pipe(
-  Layer.provide(Trading.Default),
-  Layer.provide(Layer.mergeAll(DatabaseLive, Prices.Default)),
-);
+  const shutdown = async (signal: NodeJS.Signals) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.info(`Shutting down after ${signal}`);
+    try {
+      await discord.client.destroy();
+      await discord.drain();
+    } finally {
+      database.close();
+    }
+  };
 
-NodeRuntime.runMain(Layer.launch(MainLive));
+  const onSignal = (signal: NodeJS.Signals) => {
+    void shutdown(signal).catch((error) => {
+      console.error("Graceful shutdown failed", error);
+      process.exitCode = 1;
+    });
+  };
+  process.once("SIGINT", () => onSignal("SIGINT"));
+  process.once("SIGTERM", () => onSignal("SIGTERM"));
+
+  try {
+    await discord.client.login(token);
+  } catch (error) {
+    database.close();
+    throw error;
+  }
+};
+
+main().catch((error: unknown) => {
+  console.error("Bot failed to start", error);
+  process.exitCode = 1;
+});

@@ -1,15 +1,15 @@
-import { Effect } from "effect";
 import { command } from "../command-lib.js";
-import { usd } from "../format.js";
-import { Trading } from "../trading.js";
+import { embedDescription, usd } from "../format.js";
+import { PriceUnavailable, UnknownSymbol } from "../prices.js";
+import { NoHoldings } from "../trading.js";
 
 export const liquidate = command({
   name: "liquidate",
   description: "Immediately sell every stock you hold at current market prices",
-  execute: (_, { caller }) =>
-    Effect.gen(function* () {
-      const trading = yield* Trading;
-      const liquidation = yield* trading.liquidate(caller.id);
+  defer: true,
+  execute: async (_, { caller, trading }) => {
+    try {
+      const liquidation = await trading.liquidate(caller.id);
       const sold = liquidation.orders
         .map(
           (order) =>
@@ -22,7 +22,7 @@ export const liquidate = command({
           {
             title: "All positions liquidated",
             color: 0xed4245,
-            description: sold,
+            description: embedDescription(sold),
             fields: [
               {
                 name: "Total proceeds",
@@ -38,23 +38,26 @@ export const liquidate = command({
           },
         ],
       };
-    }).pipe(
-      Effect.catchTags({
-        NoHoldings: () =>
-          Effect.succeed({
-            content: "You don't have any stocks to liquidate.",
-            ephemeral: true,
-          }),
-        UnknownSymbol: (e) =>
-          Effect.succeed({
-            content: `Couldn't find a stock with symbol **${e.symbol}**. No positions were sold.`,
-            ephemeral: true,
-          }),
-        PriceUnavailable: (e) =>
-          Effect.succeed({
-            content: `Couldn't fetch a price for **${e.symbol}** right now. No positions were sold.`,
-            ephemeral: true,
-          }),
-      }),
-    ),
+    } catch (error) {
+      if (error instanceof NoHoldings) {
+        return {
+          content: "You don't have any stocks to liquidate.",
+          ephemeral: true,
+        };
+      }
+      if (error instanceof UnknownSymbol) {
+        return {
+          content: `Couldn't find a stock with symbol **${error.symbol}**. No positions were sold.`,
+          ephemeral: true,
+        };
+      }
+      if (error instanceof PriceUnavailable) {
+        return {
+          content: `Couldn't fetch a price for **${error.symbol}** right now. No positions were sold.`,
+          ephemeral: true,
+        };
+      }
+      throw error;
+    }
+  },
 });

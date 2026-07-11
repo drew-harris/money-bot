@@ -1,46 +1,49 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import * as Drizzle from "@effect/sql-drizzle/Sqlite";
-import { SqliteClient } from "@effect/sql-sqlite-node";
+import { fileURLToPath } from "node:url";
 import BetterSqlite3 from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
+import {
+  drizzle,
+  type BetterSQLite3Database,
+} from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
-import { Config, Effect, Layer } from "effect";
+import * as schema from "./schema.js";
 
-// Path to the SQLite database file (override with DATABASE_URL).
-const DatabaseFile = Config.string("DATABASE_URL").pipe(
-  Config.withDefault("data/money-bot.db"),
+export type Database = BetterSQLite3Database<typeof schema>;
+
+export interface OpenDatabase {
+  readonly db: Database;
+  readonly close: () => void;
+}
+
+const migrationsFolder = fileURLToPath(
+  new URL("../migrations", import.meta.url),
 );
 
-// Apply pending drizzle-kit migrations from ./migrations using a short-lived
-// connection, before the app opens its own. Drizzle's better-sqlite3 migrator
-// is used here because @effect/sql-drizzle turns queries into Effects, which the
-// proxy migrator cannot drive.
-const runMigrations = (file: string) =>
-  Effect.try(() => {
-    mkdirSync(dirname(file), { recursive: true });
-    const sqlite = new BetterSqlite3(file);
-    try {
-      migrate(drizzle(sqlite), { migrationsFolder: "migrations" });
-    } finally {
-      sqlite.close();
+export const openDatabase = (
+  file = process.env.DATABASE_URL ?? "data/money-bot.db",
+): OpenDatabase => {
+  const filename = file.startsWith("file:") ? fileURLToPath(file) : file;
+  if (filename !== ":memory:" && filename !== "") {
+    mkdirSync(dirname(filename), { recursive: true });
+  }
+
+  const sqlite = new BetterSqlite3(filename);
+  try {
+    const db = drizzle(sqlite, { schema });
+    migrate(db, { migrationsFolder });
+    if (filename !== ":memory:" && filename !== "") {
+      sqlite.pragma("journal_mode = WAL");
     }
-  }).pipe(
-    Effect.tap(() => Effect.logInfo(`Database ready: ${file}`)),
-    Effect.orDie,
-  );
-
-// SqlClient layer. Migrations run first so the schema exists before any query.
-const SqlLive = Layer.unwrapEffect(
-  Effect.gen(function* () {
-    const file = yield* DatabaseFile;
-    yield* runMigrations(file);
-    return SqliteClient.layer({ filename: file });
-  }),
-);
-
-// Drizzle query-builder integration, backed by the Effect SqlClient.
-// Yield `SqliteDrizzle` in a handler to run type-safe drizzle queries as Effects.
-export const DatabaseLive = Drizzle.layer.pipe(Layer.provideMerge(SqlLive));
-
-export const SqliteDrizzle = Drizzle.SqliteDrizzle;
+    console.info(`Database ready: ${filename}`);
+    return {
+      db,
+      close: () => {
+        if (sqlite.open) sqlite.close();
+      },
+    };
+  } catch (error) {
+    sqlite.close();
+    throw error;
+  }
+};
