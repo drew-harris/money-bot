@@ -1,0 +1,8 @@
+.env
+fnox.toml
+.git
+*.tsbuildinfo
+data
+node_modules
+npm-debug.log*
+pnpm-debug.log*

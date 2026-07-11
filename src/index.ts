@@ -1,5 +1,4 @@
 import { NodeRuntime } from "@effect/platform-node";
-import * as Dotenv from "dotenv";
 import { Layer } from "effect";
 import { commandsLayer } from "./command-lib.js";
 import { balance } from "./commands/balance.js";
@@ -9,8 +8,6 @@ import { sell } from "./commands/sell.js";
 import { DatabaseLive } from "./db.js";
 import { Prices } from "./prices.js";
 import { Trading } from "./trading.js";
-
-Dotenv.config({ quiet: false });
 
 const Commands = commandsLayer([balance, buy, sell, price]);
 

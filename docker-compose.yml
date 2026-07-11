@@ -1,0 +1,13 @@
+services:
+  money-bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      DISCORD_BOT_TOKEN:
+      DISCORD_CLIENT_ID:
+      DISCORD_CLIENT_SECRET:
+    volumes:
+      - money-bot-data:/app/data
+
+volumes:
+  money-bot-data:

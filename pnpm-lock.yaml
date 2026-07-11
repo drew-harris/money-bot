@@ -32,9 +32,6 @@ importers:
       dfx:
         specifier: ^0.127.0
         version: 0.127.0(@effect/platform@0.93.8(effect@3.21.3))(effect@3.21.3)
-      dotenv:
-        specifier: ^17.4.2
-        version: 17.4.2
       drizzle-orm:
         specifier: ^0.44.7
         version: 0.44.7(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.1)
@@ -847,10 +844,6 @@ packages:
   discord-verify@1.2.0:
     resolution: {integrity: sha512-8qlrMROW8DhpzWWzgNq9kpeLDxKanWa4EDVoj/ASVv2nr+dSr4JPmu2tFSydf3hAGI/OIJTnZyD0JulMYIxx4w==}
     engines: {node: '>=16'}
-
-  dotenv@17.4.2:
-    resolution: {integrity: sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw==}
-    engines: {node: '>=12'}
 
   drizzle-kit@0.31.10:
     resolution: {integrity: sha512-7OZcmQUrdGI+DUNNsKBn1aW8qSoKuTH7d0mYgSP8bAzdFzKoovxEFnoGQp2dVs82EOJeYycqRtciopszwUf8bw==}
@@ -1788,8 +1781,6 @@ snapshots:
     dependencies:
       '@types/express': 4.17.25
     optional: true
-
-  dotenv@17.4.2: {}
 
   drizzle-kit@0.31.10:
     dependencies:
