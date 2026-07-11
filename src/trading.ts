@@ -1,4 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
+import { SqlClient } from "@effect/sql/SqlClient";
 import { Data, Effect } from "effect";
 import { SqliteDrizzle } from "./db.js";
 import { Prices } from "./prices.js";
@@ -23,8 +24,19 @@ export class InsufficientShares extends Data.TaggedError("InsufficientShares")<{
 /** Tried to liquidate a portfolio with no stock positions. */
 export class NoHoldings extends Data.TaggedError("NoHoldings")<{}> {}
 
+/** Tried to transfer an invalid cash amount. */
+export class InvalidPaymentAmount extends Data.TaggedError(
+  "InvalidPaymentAmount",
+)<{}> {}
+
+/** Tried to transfer cash to the same account. */
+export class SamePaymentRecipient extends Data.TaggedError(
+  "SamePaymentRecipient",
+)<{}> {}
+
 const makeTrading = Effect.gen(function* () {
   const db = yield* SqliteDrizzle;
+  const sqlClient = yield* SqlClient;
   const prices = yield* Prices;
 
   // Create the account (with the starting cash default) if it's the first
@@ -71,6 +83,39 @@ const makeTrading = Effect.gen(function* () {
         positions,
         netWorthCents: account.cashCents + holdingsValue,
       };
+    });
+
+  const leaderboard = () =>
+    Effect.gen(function* () {
+      const accountRows = yield* db.select().from(accounts);
+      const holdingRows = yield* db.select().from(holdings);
+      const symbols = [
+        ...new Set(holdingRows.map((holding) => holding.symbol)),
+      ];
+      const quotes = yield* Effect.forEach(
+        symbols,
+        (symbol) => prices.quote(symbol),
+        { concurrency: 5 },
+      );
+      const pricesBySymbol = new Map(
+        quotes.map((quote) => [quote.symbol, quote.priceCents]),
+      );
+      const holdingsValueByUser = new Map<string, number>();
+      for (const holding of holdingRows) {
+        const value = pricesBySymbol.get(holding.symbol)! * holding.quantity;
+        holdingsValueByUser.set(
+          holding.userId,
+          (holdingsValueByUser.get(holding.userId) ?? 0) + value,
+        );
+      }
+
+      return accountRows
+        .map((account) => ({
+          userId: account.userId,
+          netWorthCents:
+            account.cashCents + (holdingsValueByUser.get(account.userId) ?? 0),
+        }))
+        .sort((a, b) => b.netWorthCents - a.netWorthCents);
     });
 
   const buy = (userId: string, rawSymbol: string, quantity: number) =>
@@ -232,12 +277,49 @@ const makeTrading = Effect.gen(function* () {
       return { orders, proceedsCents, cashCents: account.cashCents };
     });
 
-  return { portfolio, buy, sell, liquidate } as const;
+  const pay = (fromUserId: string, toUserId: string, cents: number) =>
+    Effect.gen(function* () {
+      if (!Number.isSafeInteger(cents) || cents <= 0) {
+        return yield* new InvalidPaymentAmount();
+      }
+      if (fromUserId === toUserId) {
+        return yield* new SamePaymentRecipient();
+      }
+
+      return yield* sqlClient.withTransaction(
+        Effect.gen(function* () {
+          yield* ensureAccount(fromUserId);
+          yield* ensureAccount(toUserId);
+
+          const sender = yield* getAccount(fromUserId);
+          if (sender.cashCents < cents) {
+            return yield* new InsufficientFunds({
+              needCents: cents,
+              haveCents: sender.cashCents,
+            });
+          }
+
+          const senderCashCents = sender.cashCents - cents;
+          yield* db
+            .update(accounts)
+            .set({ cashCents: senderCashCents })
+            .where(eq(accounts.userId, fromUserId));
+          yield* db
+            .update(accounts)
+            .set({ cashCents: sql`${accounts.cashCents} + ${cents}` })
+            .where(eq(accounts.userId, toUserId));
+
+          return { cents, senderCashCents };
+        }),
+      );
+    });
+
+  return { portfolio, leaderboard, buy, sell, liquidate, pay } as const;
 });
 
 /**
- * Paper-trading operations: account management, buying, selling, and reading a
- * portfolio. Commands use this service and never touch the database directly.
+ * Paper-trading operations: account management, stock orders, cash transfers,
+ * and portfolio reads. Commands use this service and never touch the database.
  */
 export class Trading extends Effect.Service<Trading>()("app/Trading", {
   effect: makeTrading,

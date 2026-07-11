@@ -4,6 +4,9 @@ import { commandsLayer } from "./command-lib.js";
 import { balance } from "./commands/balance.js";
 import { buy } from "./commands/buy.js";
 import { liquidate } from "./commands/liquidate.js";
+import { leaderboard } from "./commands/leaderboard.js";
+import { man } from "./commands/man.js";
+import { pay } from "./commands/pay.js";
 import { price } from "./commands/price.js";
 import { sell } from "./commands/sell.js";
 import { stockinfo } from "./commands/stockinfo.js";
@@ -14,8 +17,11 @@ import { Trading } from "./trading.js";
 const Commands = commandsLayer([
   balance,
   buy,
+  man,
   sell,
   liquidate,
+  leaderboard,
+  pay,
   price,
   stockinfo,
 ]);
