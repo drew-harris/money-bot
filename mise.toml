@@ -1,2 +1,2 @@
 [tools]
-node = "22.22.2" # we need this version for sqlite and effect compat
+node = "22.22.2" # matches the SQLite and discord.js runtime

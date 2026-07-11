@@ -1,9 +1,12 @@
-import { Effect } from "effect";
 import { command, input } from "../command-lib.js";
 import { usd } from "../format.js";
-import { Trading } from "../trading.js";
+import {
+  InsufficientFunds,
+  InvalidPaymentAmount,
+  SamePaymentRecipient,
+} from "../trading.js";
 
-const toCents = (amount: number) => {
+export const toCents = (amount: number) => {
   const cents = Math.round(amount * 100);
   return Number.isFinite(amount) && Math.abs(amount * 100 - cents) < 1e-8
     ? cents
@@ -17,10 +20,9 @@ export const pay = command({
     user: input.user("User to pay"),
     amount: input.number("Dollar amount to transfer, e.g. 25.50"),
   },
-  execute: ({ user, amount }, { caller }) =>
-    Effect.gen(function* () {
-      const trading = yield* Trading;
-      const payment = yield* trading.pay(caller.id, user.id, toCents(amount));
+  execute: async ({ user, amount }, { caller, trading }) => {
+    try {
+      const payment = await trading.pay(caller.id, user.id, toCents(amount));
 
       return {
         embeds: [
@@ -38,24 +40,24 @@ export const pay = command({
           },
         ],
       };
-    }).pipe(
-      Effect.catchTags({
-        InvalidPaymentAmount: () =>
-          Effect.succeed({
-            content:
-              "Amount must be a positive dollar value with at most two decimal places.",
-            ephemeral: true,
-          }),
-        SamePaymentRecipient: () =>
-          Effect.succeed({
-            content: "You can't pay yourself.",
-            ephemeral: true,
-          }),
-        InsufficientFunds: (e) =>
-          Effect.succeed({
-            content: `Not enough cash: you're sending ${usd(e.needCents)} but only have ${usd(e.haveCents)}.`,
-            ephemeral: true,
-          }),
-      }),
-    ),
+    } catch (error) {
+      if (error instanceof InvalidPaymentAmount) {
+        return {
+          content:
+            "Amount must be a positive dollar value with at most two decimal places.",
+          ephemeral: true,
+        };
+      }
+      if (error instanceof SamePaymentRecipient) {
+        return { content: "You can't pay yourself.", ephemeral: true };
+      }
+      if (error instanceof InsufficientFunds) {
+        return {
+          content: `Not enough cash: you're sending ${usd(error.needCents)} but only have ${usd(error.haveCents)}.`,
+          ephemeral: true,
+        };
+      }
+      throw error;
+    }
+  },
 });

@@ -1,326 +1,422 @@
 import { and, eq, sql } from "drizzle-orm";
-import { SqlClient } from "@effect/sql/SqlClient";
-import { Data, Effect } from "effect";
-import { SqliteDrizzle } from "./db.js";
-import { Prices } from "./prices.js";
+import type { Database } from "./db.js";
+import { PriceUnavailable, type Prices } from "./prices.js";
 import { accounts, holdings, trades } from "./schema.js";
 
-/** Tried to buy/sell zero or a negative number of shares. */
-export class InvalidQuantity extends Data.TaggedError("InvalidQuantity")<{}> {}
+export class InvalidQuantity extends Error {}
 
-/** Not enough cash to cover a buy. */
-export class InsufficientFunds extends Data.TaggedError("InsufficientFunds")<{
-  readonly needCents: number;
-  readonly haveCents: number;
-}> {}
+export class InsufficientFunds extends Error {
+  constructor(
+    readonly needCents: number,
+    readonly haveCents: number,
+  ) {
+    super("Insufficient funds");
+  }
+}
 
-/** Tried to sell more shares than are held. */
-export class InsufficientShares extends Data.TaggedError("InsufficientShares")<{
-  readonly symbol: string;
-  readonly have: number;
-  readonly want: number;
-}> {}
+export class InsufficientShares extends Error {
+  constructor(
+    readonly symbol: string,
+    readonly have: number,
+    readonly want: number,
+  ) {
+    super("Insufficient shares");
+  }
+}
 
-/** Tried to liquidate a portfolio with no stock positions. */
-export class NoHoldings extends Data.TaggedError("NoHoldings")<{}> {}
+export class NoHoldings extends Error {}
+export class InvalidPaymentAmount extends Error {}
+export class SamePaymentRecipient extends Error {}
 
-/** Tried to transfer an invalid cash amount. */
-export class InvalidPaymentAmount extends Data.TaggedError(
-  "InvalidPaymentAmount",
-)<{}> {}
+const mapConcurrent = async <A, B>(
+  values: ReadonlyArray<A>,
+  concurrency: number,
+  transform: (value: A) => Promise<B>,
+): Promise<Array<B>> => {
+  const results = new Array<B>(values.length);
+  let next = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, values.length) },
+    async () => {
+      while (next < values.length) {
+        const index = next++;
+        results[index] = await transform(values[index]!);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+};
 
-/** Tried to transfer cash to the same account. */
-export class SamePaymentRecipient extends Data.TaggedError(
-  "SamePaymentRecipient",
-)<{}> {}
+const checkedMoney = (value: number) => {
+  if (!Number.isSafeInteger(value)) throw new RangeError("Money overflow");
+  return value;
+};
 
-const makeTrading = Effect.gen(function* () {
-  const db = yield* SqliteDrizzle;
-  const sqlClient = yield* SqlClient;
-  const prices = yield* Prices;
+export interface Trading {
+  readonly portfolio: (userId: string) => Promise<{
+    cashCents: number;
+    positions: Array<{
+      symbol: string;
+      quantity: number;
+      priceCents: number;
+      valueCents: number;
+    }>;
+    netWorthCents: number;
+  }>;
+  readonly leaderboard: () => Promise<
+    Array<{ userId: string; netWorthCents: number }>
+  >;
+  readonly buy: (
+    userId: string,
+    symbol: string,
+    quantity: number,
+  ) => Promise<{
+    symbol: string;
+    quantity: number;
+    priceCents: number;
+    costCents: number;
+    cashCents: number;
+  }>;
+  readonly sell: (
+    userId: string,
+    symbol: string,
+    quantity: number,
+  ) => Promise<{
+    symbol: string;
+    quantity: number;
+    priceCents: number;
+    proceedsCents: number;
+    cashCents: number;
+  }>;
+  readonly liquidate: (userId: string) => Promise<{
+    orders: Array<{
+      symbol: string;
+      quantity: number;
+      priceCents: number;
+      proceedsCents: number;
+    }>;
+    proceedsCents: number;
+    cashCents: number;
+  }>;
+  readonly pay: (
+    fromUserId: string,
+    toUserId: string,
+    cents: number,
+  ) => Promise<{ cents: number; senderCashCents: number }>;
+}
 
-  // Create the account (with the starting cash default) if it's the first
-  // time we've seen this user; a no-op afterwards.
-  const ensureAccount = (userId: string) =>
-    db.insert(accounts).values({ userId }).onConflictDoNothing();
+export const createTrading = (db: Database, prices: Prices): Trading => {
+  const quoteUsd = async (symbol: string) => {
+    const quote = await prices.quote(symbol);
+    if (
+      quote.currency !== "USD" ||
+      !Number.isSafeInteger(quote.priceCents) ||
+      quote.priceCents <= 0
+    ) {
+      throw new PriceUnavailable(
+        symbol,
+        new RangeError(`Invalid USD quote for ${symbol}`),
+      );
+    }
+    return quote;
+  };
 
-  const getAccount = (userId: string) =>
-    Effect.gen(function* () {
-      const rows = yield* db
-        .select()
-        .from(accounts)
-        .where(eq(accounts.userId, userId));
-      return rows[0]!;
-    });
+  const ensureAccount = (userId: string) => {
+    db.insert(accounts).values({ userId }).onConflictDoNothing().run();
+  };
 
-  const portfolio = (userId: string) =>
-    Effect.gen(function* () {
-      yield* ensureAccount(userId);
-      const account = yield* getAccount(userId);
-      const rows = yield* db
+  const getAccount = (userId: string) => {
+    const account = db
+      .select()
+      .from(accounts)
+      .where(eq(accounts.userId, userId))
+      .get();
+    if (!account) throw new Error(`Account not found: ${userId}`);
+    return account;
+  };
+
+  return {
+    portfolio: async (userId) => {
+      ensureAccount(userId);
+      const account = getAccount(userId);
+      const rows = db
         .select()
         .from(holdings)
-        .where(eq(holdings.userId, userId));
-
-      // Value each position at its current market price.
-      const positions = yield* Effect.forEach(
-        rows,
-        (h) =>
-          prices.quote(h.symbol).pipe(
-            Effect.map((q) => ({
-              symbol: h.symbol,
-              quantity: h.quantity,
-              priceCents: q.priceCents,
-              valueCents: q.priceCents * h.quantity,
-            })),
-          ),
-        { concurrency: 5 },
+        .where(eq(holdings.userId, userId))
+        .all();
+      const positions = await mapConcurrent(rows, 5, async (holding) => {
+        const quote = await quoteUsd(holding.symbol);
+        return {
+          symbol: holding.symbol,
+          quantity: holding.quantity,
+          priceCents: quote.priceCents,
+          valueCents: checkedMoney(quote.priceCents * holding.quantity),
+        };
+      });
+      const holdingsValue = positions.reduce(
+        (sum, position) => checkedMoney(sum + position.valueCents),
+        0,
       );
-
-      const holdingsValue = positions.reduce((sum, p) => sum + p.valueCents, 0);
       return {
         cashCents: account.cashCents,
         positions,
-        netWorthCents: account.cashCents + holdingsValue,
+        netWorthCents: checkedMoney(account.cashCents + holdingsValue),
       };
-    });
+    },
 
-  const leaderboard = () =>
-    Effect.gen(function* () {
-      const accountRows = yield* db.select().from(accounts);
-      const holdingRows = yield* db.select().from(holdings);
-      const symbols = [
-        ...new Set(holdingRows.map((holding) => holding.symbol)),
-      ];
-      const quotes = yield* Effect.forEach(
+    leaderboard: async () => {
+      const accountRows = db.select().from(accounts).all();
+      const holdingRows = db.select().from(holdings).all();
+      const symbols = [...new Set(holdingRows.map(({ symbol }) => symbol))];
+      const quotePairs = await mapConcurrent(
         symbols,
-        (symbol) => prices.quote(symbol),
-        { concurrency: 5 },
+        5,
+        async (symbol) =>
+          [symbol, (await quoteUsd(symbol)).priceCents] as const,
       );
-      const pricesBySymbol = new Map(
-        quotes.map((quote) => [quote.symbol, quote.priceCents]),
-      );
+      const pricesBySymbol = new Map(quotePairs);
       const holdingsValueByUser = new Map<string, number>();
       for (const holding of holdingRows) {
-        const value = pricesBySymbol.get(holding.symbol)! * holding.quantity;
+        const priceCents = pricesBySymbol.get(holding.symbol);
+        if (priceCents === undefined) {
+          throw new Error(`Missing quote for ${holding.symbol}`);
+        }
+        const value = checkedMoney(priceCents * holding.quantity);
         holdingsValueByUser.set(
           holding.userId,
-          (holdingsValueByUser.get(holding.userId) ?? 0) + value,
+          checkedMoney((holdingsValueByUser.get(holding.userId) ?? 0) + value),
         );
       }
-
       return accountRows
         .map((account) => ({
           userId: account.userId,
-          netWorthCents:
+          netWorthCents: checkedMoney(
             account.cashCents + (holdingsValueByUser.get(account.userId) ?? 0),
+          ),
         }))
         .sort((a, b) => b.netWorthCents - a.netWorthCents);
-    });
+    },
 
-  const buy = (userId: string, rawSymbol: string, quantity: number) =>
-    Effect.gen(function* () {
+    buy: async (userId, rawSymbol, quantity) => {
       if (!Number.isInteger(quantity) || quantity <= 0) {
-        return yield* new InvalidQuantity();
+        throw new InvalidQuantity();
       }
       const symbol = rawSymbol.trim().toUpperCase();
-      yield* ensureAccount(userId);
-
-      const quote = yield* prices.quote(symbol);
-      const costCents = quote.priceCents * quantity;
-      const account = yield* getAccount(userId);
-      if (account.cashCents < costCents) {
-        return yield* new InsufficientFunds({
-          needCents: costCents,
-          haveCents: account.cashCents,
-        });
-      }
-
-      const cashCents = account.cashCents - costCents;
-      yield* db
-        .update(accounts)
-        .set({ cashCents })
-        .where(eq(accounts.userId, userId));
-      yield* db
-        .insert(holdings)
-        .values({ userId, symbol, quantity })
-        .onConflictDoUpdate({
-          target: [holdings.userId, holdings.symbol],
-          set: { quantity: sql`${holdings.quantity} + ${quantity}` },
-        });
-      yield* db.insert(trades).values({
-        userId,
-        symbol,
-        side: "buy",
-        quantity,
-        priceCents: quote.priceCents,
+      const quote = await quoteUsd(symbol);
+      const costCents = checkedMoney(quote.priceCents * quantity);
+      return db.transaction((tx) => {
+        tx.insert(accounts).values({ userId }).onConflictDoNothing().run();
+        const account = tx
+          .select()
+          .from(accounts)
+          .where(eq(accounts.userId, userId))
+          .get()!;
+        if (account.cashCents < costCents) {
+          throw new InsufficientFunds(costCents, account.cashCents);
+        }
+        const cashCents = checkedMoney(account.cashCents - costCents);
+        tx.update(accounts)
+          .set({ cashCents })
+          .where(eq(accounts.userId, userId))
+          .run();
+        tx.insert(holdings)
+          .values({ userId, symbol, quantity })
+          .onConflictDoUpdate({
+            target: [holdings.userId, holdings.symbol],
+            set: { quantity: sql`${holdings.quantity} + ${quantity}` },
+          })
+          .run();
+        tx.insert(trades)
+          .values({
+            userId,
+            symbol,
+            side: "buy",
+            quantity,
+            priceCents: quote.priceCents,
+          })
+          .run();
+        return {
+          symbol,
+          quantity,
+          priceCents: quote.priceCents,
+          costCents,
+          cashCents,
+        };
       });
+    },
 
-      return {
-        symbol,
-        quantity,
-        priceCents: quote.priceCents,
-        costCents,
-        cashCents,
-      };
-    });
-
-  const sell = (userId: string, rawSymbol: string, quantity: number) =>
-    Effect.gen(function* () {
+    sell: async (userId, rawSymbol, quantity) => {
       if (!Number.isInteger(quantity) || quantity <= 0) {
-        return yield* new InvalidQuantity();
+        throw new InvalidQuantity();
       }
       const symbol = rawSymbol.trim().toUpperCase();
-      yield* ensureAccount(userId);
-
+      ensureAccount(userId);
       const where = and(
         eq(holdings.userId, userId),
         eq(holdings.symbol, symbol),
       );
-      const existingRows = yield* db.select().from(holdings).where(where);
-      const existing = existingRows[0];
-      if (!existing || existing.quantity < quantity) {
-        return yield* new InsufficientShares({
+      const initial = db.select().from(holdings).where(where).get();
+      if (!initial || initial.quantity < quantity) {
+        throw new InsufficientShares(symbol, initial?.quantity ?? 0, quantity);
+      }
+      const quote = await quoteUsd(symbol);
+      const proceedsCents = checkedMoney(quote.priceCents * quantity);
+      return db.transaction((tx) => {
+        const existing = tx.select().from(holdings).where(where).get();
+        if (!existing || existing.quantity < quantity) {
+          throw new InsufficientShares(
+            symbol,
+            existing?.quantity ?? 0,
+            quantity,
+          );
+        }
+        if (existing.quantity === quantity) {
+          tx.delete(holdings).where(where).run();
+        } else {
+          tx.update(holdings)
+            .set({ quantity: existing.quantity - quantity })
+            .where(where)
+            .run();
+        }
+        const account = tx
+          .select()
+          .from(accounts)
+          .where(eq(accounts.userId, userId))
+          .get()!;
+        const cashCents = checkedMoney(account.cashCents + proceedsCents);
+        tx.update(accounts)
+          .set({ cashCents })
+          .where(eq(accounts.userId, userId))
+          .run();
+        tx.insert(trades)
+          .values({
+            userId,
+            symbol,
+            side: "sell",
+            quantity,
+            priceCents: quote.priceCents,
+          })
+          .run();
+        return {
           symbol,
-          have: existing?.quantity ?? 0,
-          want: quantity,
-        });
-      }
-
-      const quote = yield* prices.quote(symbol);
-      const proceedsCents = quote.priceCents * quantity;
-
-      if (existing.quantity === quantity) {
-        yield* db.delete(holdings).where(where);
-      } else {
-        yield* db
-          .update(holdings)
-          .set({ quantity: existing.quantity - quantity })
-          .where(where);
-      }
-
-      const account = yield* getAccount(userId);
-      const cashCents = account.cashCents + proceedsCents;
-      yield* db
-        .update(accounts)
-        .set({ cashCents })
-        .where(eq(accounts.userId, userId));
-      yield* db.insert(trades).values({
-        userId,
-        symbol,
-        side: "sell",
-        quantity,
-        priceCents: quote.priceCents,
+          quantity,
+          priceCents: quote.priceCents,
+          proceedsCents,
+          cashCents,
+        };
       });
+    },
 
-      return {
-        symbol,
-        quantity,
-        priceCents: quote.priceCents,
-        proceedsCents,
-        cashCents,
-      };
-    });
-
-  const liquidate = (userId: string) =>
-    Effect.gen(function* () {
-      yield* ensureAccount(userId);
-      const positions = yield* db
+    liquidate: async (userId) => {
+      ensureAccount(userId);
+      const positions = db
         .select()
         .from(holdings)
-        .where(eq(holdings.userId, userId));
-      if (positions.length === 0) {
-        return yield* new NoHoldings();
-      }
-
-      // Resolve every price before changing the portfolio, so a price failure
-      // leaves every holding intact rather than creating a partial liquidation.
-      const orders = yield* Effect.forEach(
-        positions,
-        (position) =>
-          prices.quote(position.symbol).pipe(
-            Effect.map((quote) => ({
-              symbol: position.symbol,
-              quantity: position.quantity,
-              priceCents: quote.priceCents,
-              proceedsCents: quote.priceCents * position.quantity,
-            })),
-          ),
-        { concurrency: 5 },
-      );
+        .where(eq(holdings.userId, userId))
+        .all();
+      if (positions.length === 0) throw new NoHoldings();
+      const orders = await mapConcurrent(positions, 5, async (position) => {
+        const quote = await quoteUsd(position.symbol);
+        return {
+          symbol: position.symbol,
+          quantity: position.quantity,
+          priceCents: quote.priceCents,
+          proceedsCents: checkedMoney(quote.priceCents * position.quantity),
+        };
+      });
       const proceedsCents = orders.reduce(
-        (total, order) => total + order.proceedsCents,
+        (total, order) => checkedMoney(total + order.proceedsCents),
         0,
       );
-
-      for (const order of orders) {
-        yield* db
-          .delete(holdings)
-          .where(
-            and(eq(holdings.userId, userId), eq(holdings.symbol, order.symbol)),
+      return db.transaction((tx) => {
+        const currentPositions = tx
+          .select()
+          .from(holdings)
+          .where(eq(holdings.userId, userId))
+          .all();
+        if (
+          currentPositions.length !== orders.length ||
+          currentPositions.some(
+            (position) =>
+              !orders.some(
+                (order) =>
+                  order.symbol === position.symbol &&
+                  order.quantity === position.quantity,
+              ),
+          )
+        ) {
+          throw new Error("Portfolio changed while prices were loading");
+        }
+        for (const order of orders) {
+          const where = and(
+            eq(holdings.userId, userId),
+            eq(holdings.symbol, order.symbol),
           );
-        yield* db.insert(trades).values({
-          userId,
-          symbol: order.symbol,
-          side: "sell",
-          quantity: order.quantity,
-          priceCents: order.priceCents,
-        });
-      }
-
-      yield* db
-        .update(accounts)
-        .set({ cashCents: sql`${accounts.cashCents} + ${proceedsCents}` })
-        .where(eq(accounts.userId, userId));
-      const account = yield* getAccount(userId);
-
-      return { orders, proceedsCents, cashCents: account.cashCents };
-    });
-
-  const pay = (fromUserId: string, toUserId: string, cents: number) =>
-    Effect.gen(function* () {
-      if (!Number.isSafeInteger(cents) || cents <= 0) {
-        return yield* new InvalidPaymentAmount();
-      }
-      if (fromUserId === toUserId) {
-        return yield* new SamePaymentRecipient();
-      }
-
-      return yield* sqlClient.withTransaction(
-        Effect.gen(function* () {
-          yield* ensureAccount(fromUserId);
-          yield* ensureAccount(toUserId);
-
-          const sender = yield* getAccount(fromUserId);
-          if (sender.cashCents < cents) {
-            return yield* new InsufficientFunds({
-              needCents: cents,
-              haveCents: sender.cashCents,
-            });
+          const current = tx.select().from(holdings).where(where).get();
+          if (!current || current.quantity !== order.quantity) {
+            throw new Error("Portfolio changed while prices were loading");
           }
+          tx.delete(holdings).where(where).run();
+          tx.insert(trades)
+            .values({
+              userId,
+              symbol: order.symbol,
+              side: "sell",
+              quantity: order.quantity,
+              priceCents: order.priceCents,
+            })
+            .run();
+        }
+        tx.update(accounts)
+          .set({ cashCents: sql`${accounts.cashCents} + ${proceedsCents}` })
+          .where(eq(accounts.userId, userId))
+          .run();
+        const account = tx
+          .select()
+          .from(accounts)
+          .where(eq(accounts.userId, userId))
+          .get()!;
+        checkedMoney(account.cashCents);
+        return { orders, proceedsCents, cashCents: account.cashCents };
+      });
+    },
 
-          const senderCashCents = sender.cashCents - cents;
-          yield* db
-            .update(accounts)
-            .set({ cashCents: senderCashCents })
-            .where(eq(accounts.userId, fromUserId));
-          yield* db
-            .update(accounts)
-            .set({ cashCents: sql`${accounts.cashCents} + ${cents}` })
-            .where(eq(accounts.userId, toUserId));
-
-          return { cents, senderCashCents };
-        }),
-      );
-    });
-
-  return { portfolio, leaderboard, buy, sell, liquidate, pay } as const;
-});
-
-/**
- * Paper-trading operations: account management, stock orders, cash transfers,
- * and portfolio reads. Commands use this service and never touch the database.
- */
-export class Trading extends Effect.Service<Trading>()("app/Trading", {
-  effect: makeTrading,
-}) {}
+    pay: async (fromUserId, toUserId, cents) => {
+      if (!Number.isSafeInteger(cents) || cents <= 0) {
+        throw new InvalidPaymentAmount();
+      }
+      if (fromUserId === toUserId) throw new SamePaymentRecipient();
+      return db.transaction((tx) => {
+        tx.insert(accounts)
+          .values([{ userId: fromUserId }, { userId: toUserId }])
+          .onConflictDoNothing()
+          .run();
+        const sender = tx
+          .select()
+          .from(accounts)
+          .where(eq(accounts.userId, fromUserId))
+          .get()!;
+        const recipient = tx
+          .select()
+          .from(accounts)
+          .where(eq(accounts.userId, toUserId))
+          .get()!;
+        if (sender.cashCents < cents) {
+          throw new InsufficientFunds(cents, sender.cashCents);
+        }
+        const senderCashCents = checkedMoney(sender.cashCents - cents);
+        const recipientCashCents = checkedMoney(recipient.cashCents + cents);
+        tx.update(accounts)
+          .set({ cashCents: senderCashCents })
+          .where(eq(accounts.userId, fromUserId))
+          .run();
+        tx.update(accounts)
+          .set({ cashCents: recipientCashCents })
+          .where(eq(accounts.userId, toUserId))
+          .run();
+        return { cents, senderCashCents };
+      });
+    },
+  };
+};

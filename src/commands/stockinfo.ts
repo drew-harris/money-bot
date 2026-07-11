@@ -1,7 +1,6 @@
-import { Effect } from "effect";
 import { command, input } from "../command-lib.js";
 import { usd } from "../format.js";
-import { Prices } from "../prices.js";
+import { PriceUnavailable, UnknownSymbol } from "../prices.js";
 
 // Sends users to Yahoo Finance's full quote page after confirming the ticker exists.
 export const stockinfo = command({
@@ -10,10 +9,10 @@ export const stockinfo = command({
   inputs: {
     symbol: input.string("Ticker symbol, e.g. AAPL"),
   },
-  execute: ({ symbol }) =>
-    Effect.gen(function* () {
-      const prices = yield* Prices;
-      const quote = yield* prices.quote(symbol);
+  defer: true,
+  execute: async ({ symbol }, { prices }) => {
+    try {
+      const quote = await prices.quote(symbol);
       const url = `https://finance.yahoo.com/quote/${encodeURIComponent(quote.symbol)}/`;
 
       return {
@@ -32,18 +31,20 @@ export const stockinfo = command({
           },
         ],
       };
-    }).pipe(
-      Effect.catchTags({
-        UnknownSymbol: (e) =>
-          Effect.succeed({
-            content: `Couldn't find a stock with symbol **${e.symbol}**.`,
-            ephemeral: true,
-          }),
-        PriceUnavailable: (e) =>
-          Effect.succeed({
-            content: `Couldn't fetch information for **${e.symbol}** right now. Try again shortly.`,
-            ephemeral: true,
-          }),
-      }),
-    ),
+    } catch (error) {
+      if (error instanceof UnknownSymbol) {
+        return {
+          content: `Couldn't find a stock with symbol **${error.symbol}**.`,
+          ephemeral: true,
+        };
+      }
+      if (error instanceof PriceUnavailable) {
+        return {
+          content: `Couldn't fetch information for **${error.symbol}** right now. Try again shortly.`,
+          ephemeral: true,
+        };
+      }
+      throw error;
+    }
+  },
 });

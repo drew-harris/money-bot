@@ -4,3 +4,6 @@ export const usd = (cents: number) =>
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })}`;
+
+export const embedDescription = (text: string) =>
+  text.length <= 4096 ? text : `${text.slice(0, 4093)}...`;
