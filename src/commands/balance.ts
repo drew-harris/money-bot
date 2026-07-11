@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import { command, input } from "../command-lib.js";
 import { usd } from "../format.js";
 import { Trading } from "../trading.js";
+import { catchQuoteErrors } from "./quote-errors.js";
 
 // Shows a user's cash, every position valued at the current market price,
 // and total net worth. Everyone starts at $10,000 the first time they trade.
@@ -52,17 +53,9 @@ export const balance = command({
         ],
       };
     }).pipe(
-      Effect.catchTags({
-        UnknownSymbol: (e) =>
-          Effect.succeed({
-            content: `One of your holdings (**${e.symbol}**) couldn't be priced right now. Try again shortly.`,
-            ephemeral: true,
-          }),
-        PriceUnavailable: (e) =>
-          Effect.succeed({
-            content: `Couldn't fetch a price for **${e.symbol}** right now. Try again shortly.`,
-            ephemeral: true,
-          }),
+      catchQuoteErrors({
+        unknownSymbol: (symbol) =>
+          `One of your holdings (**${symbol}**) couldn't be priced right now. Try again shortly.`,
       }),
     ),
 });

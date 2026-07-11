@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import { command, input } from "../command-lib.js";
 import { usd } from "../format.js";
 import { Prices } from "../prices.js";
+import { catchQuoteErrors } from "./quote-errors.js";
 
 // Sends users to Yahoo Finance's full quote page after confirming the ticker exists.
 export const stockinfo = command({
@@ -33,17 +34,9 @@ export const stockinfo = command({
         ],
       };
     }).pipe(
-      Effect.catchTags({
-        UnknownSymbol: (e) =>
-          Effect.succeed({
-            content: `Couldn't find a stock with symbol **${e.symbol}**.`,
-            ephemeral: true,
-          }),
-        PriceUnavailable: (e) =>
-          Effect.succeed({
-            content: `Couldn't fetch information for **${e.symbol}** right now. Try again shortly.`,
-            ephemeral: true,
-          }),
+      catchQuoteErrors({
+        priceUnavailable: (symbol) =>
+          `Couldn't fetch information for **${symbol}** right now. Try again shortly.`,
       }),
     ),
 });

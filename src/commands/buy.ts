@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import { command, input } from "../command-lib.js";
 import { usd } from "../format.js";
 import { Trading } from "../trading.js";
+import { catchQuoteErrors } from "./quote-errors.js";
 
 export const buy = command({
   name: "buy",
@@ -29,20 +30,11 @@ export const buy = command({
         ],
       };
     }).pipe(
+      catchQuoteErrors(),
       Effect.catchTags({
         InvalidQuantity: () =>
           Effect.succeed({
             content: "Quantity must be a positive whole number of shares.",
-            ephemeral: true,
-          }),
-        UnknownSymbol: (e) =>
-          Effect.succeed({
-            content: `Couldn't find a stock with symbol **${e.symbol}**.`,
-            ephemeral: true,
-          }),
-        PriceUnavailable: (e) =>
-          Effect.succeed({
-            content: `Couldn't fetch a price for **${e.symbol}** right now. Try again shortly.`,
             ephemeral: true,
           }),
         InsufficientFunds: (e) =>

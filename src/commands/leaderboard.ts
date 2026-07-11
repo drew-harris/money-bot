@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import { command } from "../command-lib.js";
 import { usd } from "../format.js";
 import { Trading } from "../trading.js";
+import { catchQuoteErrors } from "./quote-errors.js";
 
 export const leaderboard = command({
   name: "leaderboard",
@@ -29,17 +30,9 @@ export const leaderboard = command({
         ],
       };
     }).pipe(
-      Effect.catchTags({
-        UnknownSymbol: (e) =>
-          Effect.succeed({
-            content: `One of the holdings (**${e.symbol}**) couldn't be priced right now. Try again shortly.`,
-            ephemeral: true,
-          }),
-        PriceUnavailable: (e) =>
-          Effect.succeed({
-            content: `Couldn't fetch a price for **${e.symbol}** right now. Try again shortly.`,
-            ephemeral: true,
-          }),
+      catchQuoteErrors({
+        unknownSymbol: (symbol) =>
+          `One of the holdings (**${symbol}**) couldn't be priced right now. Try again shortly.`,
       }),
     ),
 });
