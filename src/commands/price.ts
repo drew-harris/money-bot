@@ -14,7 +14,10 @@ export const price = command({
     Effect.gen(function* () {
       const prices = yield* Prices;
       const quote = yield* prices.quote(symbol);
-      return `**${quote.symbol}**: ${usd(quote.priceCents)} ${quote.currency}`;
+      return {
+        content: `**${quote.symbol}**: ${usd(quote.priceCents)} ${quote.currency}`,
+        ephemeral: true,
+      };
     }).pipe(
       Effect.catchTags({
         UnknownSymbol: (e) =>

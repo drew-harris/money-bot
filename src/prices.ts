@@ -32,6 +32,15 @@ const YahooChart = Schema.Struct({
             regularMarketPrice: Schema.optional(Schema.Number),
             currency: Schema.optional(Schema.String),
           }),
+          indicators: Schema.optional(
+            Schema.Struct({
+              quote: Schema.Array(
+                Schema.Struct({
+                  close: Schema.Array(Schema.NullishOr(Schema.Number)),
+                }),
+              ),
+            }),
+          ),
         }),
       ),
     ),
@@ -46,7 +55,7 @@ const makePrices = Effect.gen(function* () {
       const symbol = rawSymbol.trim().toUpperCase();
       const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
         symbol,
-      )}?interval=1d&range=1d`;
+      )}?interval=1m&range=1d&includePrePost=true`;
 
       const body = yield* client
         .get(url, {
@@ -61,13 +70,19 @@ const makePrices = Effect.gen(function* () {
         );
 
       const meta = body.chart.result?.[0]?.meta;
-      if (!meta || typeof meta.regularMarketPrice !== "number") {
+      const closes = body.chart.result?.[0]?.indicators?.quote[0]?.close;
+      // The final intraday close includes pre- and post-market data, which is
+      // also the freshest available price during weekends and other closures.
+      const price = Array.from(closes ?? [])
+        .reverse()
+        .find((close) => typeof close === "number") ?? meta?.regularMarketPrice;
+      if (!meta || typeof price !== "number") {
         return yield* new UnknownSymbol({ symbol });
       }
 
       return {
         symbol: meta.symbol ?? symbol,
-        priceCents: Math.round(meta.regularMarketPrice * 100),
+        priceCents: Math.round(price * 100),
         currency: meta.currency ?? "USD",
       } satisfies Quote;
     });

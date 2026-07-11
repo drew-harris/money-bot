@@ -5,11 +5,12 @@ import { balance } from "./commands/balance.js";
 import { buy } from "./commands/buy.js";
 import { price } from "./commands/price.js";
 import { sell } from "./commands/sell.js";
+import { stockinfo } from "./commands/stockinfo.js";
 import { DatabaseLive } from "./db.js";
 import { Prices } from "./prices.js";
 import { Trading } from "./trading.js";
 
-const Commands = commandsLayer([balance, buy, sell, price]);
+const Commands = commandsLayer([balance, buy, sell, price, stockinfo]);
 
 const MainLive = Commands.pipe(
   Layer.provide(Trading.Default),

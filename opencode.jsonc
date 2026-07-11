@@ -1,0 +1,10 @@
+{
+    "$schema": "https://opencode.ai/config.json",
+    "references": {
+        "dfx": {
+            "repository": "tim-smart/dfx",
+            "branch": "main",
+            "description": "Discord EffectTS Bot Library",
+        },
+    },
+}
