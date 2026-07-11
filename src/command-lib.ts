@@ -66,7 +66,7 @@ export interface Reply extends Discord.IncomingWebhookInteractionRequest {
 export type ReplyResult = string | Reply;
 
 // Discord message flag marking a reply as ephemeral (visible only to the caller).
-const EPHEMERAL_FLAG = 1 << 6;
+const EPHEMERAL_FLAG = Discord.MessageFlags.Ephemeral;
 
 const toResponse = (
   reply: ReplyResult,
@@ -79,7 +79,10 @@ const toResponse = (
           // every other Discord field (embeds, components, ...) untouched.
           const { ephemeral, flags, ...rest } = reply;
           return ephemeral || flags != null
-            ? { ...rest, flags: (flags ?? 0) | (ephemeral ? EPHEMERAL_FLAG : 0) }
+            ? {
+                ...rest,
+                flags: (flags ?? 0) | (ephemeral ? EPHEMERAL_FLAG : 0),
+              }
             : rest;
         })();
   return Ix.response({
@@ -164,7 +167,11 @@ export const input = {
     Discord.ApplicationCommandOptionType.BOOLEAN,
     (ix, name) => {
       const value = rawValue(ix, name);
-      return value === undefined ? undefined : value === "true";
+      return value === undefined
+        ? undefined
+        : typeof value === "boolean"
+          ? value
+          : value === "true";
     },
   ),
   /** A Discord user argument; resolves to the full user object. */
@@ -174,8 +181,10 @@ export const input = {
       Option.getOrUndefined(
         // `resolve`'s typed overloads need the literal command shape (which this
         // generic façade doesn't carry), so we read it dynamically here.
-        (ix as any).resolve(name, (id: string, data: Discord.InteractionDataResolved) =>
-          data.users?.[id],
+        (ix as any).resolve(
+          name,
+          (id: string, data: Discord.InteractionDataResolved) =>
+            data.users?.[id],
         ),
       ),
   ),

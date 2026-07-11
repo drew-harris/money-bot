@@ -1,5 +1,10 @@
 import { sql } from "drizzle-orm";
-import { integer, primaryKey, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import {
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+} from "drizzle-orm/sqlite-core";
 
 // Money is stored as integer cents everywhere to avoid floating-point drift.
 // Every new account starts with this much cash.

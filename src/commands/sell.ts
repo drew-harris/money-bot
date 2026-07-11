@@ -22,7 +22,11 @@ export const sell = command({
             color: 0xed4245,
             description: `Sold **${order.quantity}** ${order.symbol} @ ${usd(order.priceCents)}`,
             fields: [
-              { name: "Proceeds", value: usd(order.proceedsCents), inline: true },
+              {
+                name: "Proceeds",
+                value: usd(order.proceedsCents),
+                inline: true,
+              },
               { name: "Cash now", value: usd(order.cashCents), inline: true },
             ],
           },

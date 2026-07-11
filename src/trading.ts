@@ -20,6 +20,9 @@ export class InsufficientShares extends Data.TaggedError("InsufficientShares")<{
   readonly want: number;
 }> {}
 
+/** Tried to liquidate a portfolio with no stock positions. */
+export class NoHoldings extends Data.TaggedError("NoHoldings")<{}> {}
+
 const makeTrading = Effect.gen(function* () {
   const db = yield* SqliteDrizzle;
   const prices = yield* Prices;
@@ -174,7 +177,62 @@ const makeTrading = Effect.gen(function* () {
       };
     });
 
-  return { portfolio, buy, sell } as const;
+  const liquidate = (userId: string) =>
+    Effect.gen(function* () {
+      yield* ensureAccount(userId);
+      const positions = yield* db
+        .select()
+        .from(holdings)
+        .where(eq(holdings.userId, userId));
+      if (positions.length === 0) {
+        return yield* new NoHoldings();
+      }
+
+      // Resolve every price before changing the portfolio, so a price failure
+      // leaves every holding intact rather than creating a partial liquidation.
+      const orders = yield* Effect.forEach(
+        positions,
+        (position) =>
+          prices.quote(position.symbol).pipe(
+            Effect.map((quote) => ({
+              symbol: position.symbol,
+              quantity: position.quantity,
+              priceCents: quote.priceCents,
+              proceedsCents: quote.priceCents * position.quantity,
+            })),
+          ),
+        { concurrency: 5 },
+      );
+      const proceedsCents = orders.reduce(
+        (total, order) => total + order.proceedsCents,
+        0,
+      );
+
+      for (const order of orders) {
+        yield* db
+          .delete(holdings)
+          .where(
+            and(eq(holdings.userId, userId), eq(holdings.symbol, order.symbol)),
+          );
+        yield* db.insert(trades).values({
+          userId,
+          symbol: order.symbol,
+          side: "sell",
+          quantity: order.quantity,
+          priceCents: order.priceCents,
+        });
+      }
+
+      yield* db
+        .update(accounts)
+        .set({ cashCents: sql`${accounts.cashCents} + ${proceedsCents}` })
+        .where(eq(accounts.userId, userId));
+      const account = yield* getAccount(userId);
+
+      return { orders, proceedsCents, cashCents: account.cashCents };
+    });
+
+  return { portfolio, buy, sell, liquidate } as const;
 });
 
 /**

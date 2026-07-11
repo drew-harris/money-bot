@@ -66,10 +66,7 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {
         "holdings_user_id_symbol_pk": {
-          "columns": [
-            "user_id",
-            "symbol"
-          ],
+          "columns": ["user_id", "symbol"],
           "name": "holdings_user_id_symbol_pk"
         }
       },

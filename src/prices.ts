@@ -73,9 +73,11 @@ const makePrices = Effect.gen(function* () {
       const closes = body.chart.result?.[0]?.indicators?.quote[0]?.close;
       // The final intraday close includes pre- and post-market data, which is
       // also the freshest available price during weekends and other closures.
-      const price = Array.from(closes ?? [])
-        .reverse()
-        .find((close) => typeof close === "number") ?? meta?.regularMarketPrice;
+      const price =
+        Array.from(closes ?? [])
+          .reverse()
+          .find((close) => typeof close === "number") ??
+        meta?.regularMarketPrice;
       if (!meta || typeof price !== "number") {
         return yield* new UnknownSymbol({ symbol });
       }

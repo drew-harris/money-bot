@@ -14,6 +14,11 @@ def main [action: string] {
     "off" => {
       docker compose down
     }
-    _ => { error make { msg: "Usage: ./toggle-run.nu <on|off>" } }
+    "dev" => {
+      docker compose down
+      do --ignore-errors { tmux kill-session -t money-bot-dev }
+      tmux new-session -d -s money-bot-dev "pnpm dev"
+    }
+    _ => { error make { msg: "Usage: ./toggle-run.nu <on|off|dev>" } }
   }
 }
