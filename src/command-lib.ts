@@ -1,17 +1,18 @@
 import {
   ApplicationCommandOptionType,
+  type ChatInputCommandInteraction,
   Client,
   Events,
   GatewayIntentBits,
+  type InteractionEditReplyOptions,
+  type InteractionReplyOptions,
+  type Message,
   MessageFlags,
   MessageFlagsBitField,
+  type MessageFlagsResolvable,
   REST,
   Routes,
   SlashCommandBuilder,
-  type ChatInputCommandInteraction,
-  type InteractionEditReplyOptions,
-  type InteractionReplyOptions,
-  type MessageFlagsResolvable,
   type User,
 } from "discord.js";
 import type { Prices } from "./prices.js";
@@ -28,6 +29,11 @@ export interface CommandServices {
   readonly prices: Prices;
   readonly trading: Trading;
 }
+
+export type MessageHandler = (
+  message: Message,
+  services: CommandServices,
+) => Promise<void>;
 
 interface Input<V> {
   readonly optionType: ApplicationCommandOptionType;
@@ -267,8 +273,16 @@ export const command = <I extends InputsRecord = Record<never, never>>(
 export const createDiscordClient = (
   commands: ReadonlyArray<Command>,
   services: CommandServices,
+  messageHandler?: MessageHandler,
 ) => {
-  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+  const client = new Client({
+    intents: [
+      GatewayIntentBits.Guilds,
+      ...(messageHandler
+        ? [GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
+        : []),
+    ],
+  });
   const commandsByName = new Map(commands.map((item) => [item.name, item]));
   const activeHandlers = new Set<Promise<void>>();
   client.on(Events.InteractionCreate, (interaction) => {
@@ -292,6 +306,19 @@ export const createDiscordClient = (
     activeHandlers.add(handler);
     void handler.finally(() => activeHandlers.delete(handler));
   });
+  if (messageHandler) {
+    client.on(Events.MessageCreate, (message) => {
+      const handler = messageHandler(message, services).catch((error) => {
+        console.error("Message handler failed", {
+          messageId: message.id,
+          userId: message.author.id,
+          error,
+        });
+      });
+      activeHandlers.add(handler);
+      void handler.finally(() => activeHandlers.delete(handler));
+    });
+  }
   client.on(Events.Error, (error) =>
     console.error("Discord client error", error),
   );

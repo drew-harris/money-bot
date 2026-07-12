@@ -1,4 +1,5 @@
 import { createDiscordClient } from "./command-lib.js";
+import { handleManMessage } from "./commands/man.js";
 import { commands } from "./commands.js";
 import { requiredEnvironment } from "./config.js";
 import { openDatabase } from "./db.js";
@@ -10,7 +11,11 @@ const main = async () => {
   const database = openDatabase();
   const prices = createPrices();
   const trading = createTrading(database.db, prices);
-  const discord = createDiscordClient(commands, { prices, trading });
+  const discord = createDiscordClient(
+    commands,
+    { prices, trading },
+    (message) => handleManMessage(message, trading),
+  );
   let shuttingDown = false;
 
   const shutdown = async (signal: NodeJS.Signals) => {

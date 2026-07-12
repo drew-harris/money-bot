@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ApplicationCommandOptionType } from "discord.js";
-import { commands } from "./commands.js";
 import { toCents } from "./commands/pay.js";
+import { commands } from "./commands.js";
 
 test("exports the complete slash command payload", () => {
   assert.deepEqual(

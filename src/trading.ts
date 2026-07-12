@@ -1,6 +1,6 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./db.js";
-import { PriceUnavailable, type Prices } from "./prices.js";
+import { type Prices, PriceUnavailable } from "./prices.js";
 import { accounts, holdings, trades } from "./schema.js";
 
 export class InvalidQuantity extends Error {}
