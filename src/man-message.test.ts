@@ -10,6 +10,7 @@ test("an exact man message buys one MAN share and replies with the order embed",
   const calls: Array<unknown> = [];
   const replies: Array<unknown> = [];
   const message = {
+    id: "message-1",
     author: { id: "alice", bot: false },
     content: "man",
     reply: async (reply: unknown) => {
@@ -31,7 +32,7 @@ test("an exact man message buys one MAN share and replies with the order embed",
     }),
   );
 
-  assert.deepEqual(calls, [["alice", "MAN", 1]]);
+  assert.deepEqual(calls, [["alice", "MAN", 1, "message-1"]]);
   assert.deepEqual(replies, [
     {
       embeds: [

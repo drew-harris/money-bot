@@ -1,5 +1,4 @@
 import type { Message, MessageReplyOptions } from "discord.js";
-import { command } from "../command-lib.js";
 import { usd } from "../format.js";
 import { PriceUnavailable, UnknownSymbol } from "../prices.js";
 import { InsufficientFunds, type Trading } from "../trading.js";
@@ -8,9 +7,13 @@ type ManReply =
   | { readonly embeds: NonNullable<MessageReplyOptions["embeds"]> }
   | { readonly content: string; readonly ephemeral: true };
 
-const buyMan = async (userId: string, trading: Trading): Promise<ManReply> => {
+const buyMan = async (
+  userId: string,
+  trading: Trading,
+  requestId?: string,
+): Promise<ManReply> => {
   try {
-    const order = await trading.buy(userId, "MAN", 1);
+    const order = await trading.buy(userId, "MAN", 1, requestId);
 
     return {
       embeds: [
@@ -51,17 +54,10 @@ const buyMan = async (userId: string, trading: Trading): Promise<ManReply> => {
 export const handleManMessage = async (message: Message, trading: Trading) => {
   if (message.author.bot || message.content.toLowerCase() !== "man") return;
 
-  const response = await buyMan(message.author.id, trading);
+  const response = await buyMan(message.author.id, trading, message.id);
   await message.reply(
     "embeds" in response
       ? { embeds: response.embeds, allowedMentions: { parse: [] } }
       : { content: response.content, allowedMentions: { parse: [] } },
   );
 };
-
-export const man = command({
-  name: "man",
-  description: "Buy one share of MAN at the current market price",
-  defer: true,
-  execute: async (_, { caller, trading }) => buyMan(caller.id, trading),
-});

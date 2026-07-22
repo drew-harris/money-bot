@@ -30,6 +30,8 @@ export const openDatabase = (
 
   const sqlite = new BetterSqlite3(filename);
   try {
+    sqlite.pragma("busy_timeout = 5000");
+    sqlite.pragma("foreign_keys = ON");
     const db = drizzle(sqlite, { schema });
     migrate(db, { migrationsFolder });
     if (filename !== ":memory:" && filename !== "") {

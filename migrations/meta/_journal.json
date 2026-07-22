@@ -8,6 +8,20 @@
       "when": 1781408775811,
       "tag": "0000_harsh_spot",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1784701768682,
+      "tag": "0001_interactive_profiles",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1784705000000,
+      "tag": "0002_receipt_balances",
+      "breakpoints": true
     }
   ]
 }
