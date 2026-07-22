@@ -3,7 +3,7 @@ import { embedDescription, usd } from "../format.js";
 import { PriceUnavailable, UnknownSymbol } from "../prices.js";
 
 export const leaderboard = command({
-  name: "leaderboard",
+  name: "baltop",
   description: "Show every trader ranked by net worth",
   defer: true,
   execute: async (_, { trading }) => {
