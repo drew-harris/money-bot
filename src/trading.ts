@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { Database } from "./db.js";
 import { type Prices, PriceUnavailable } from "./prices.js";
 import { accounts, holdings, trades } from "./schema.js";
@@ -61,6 +61,8 @@ export interface Trading {
       quantity: number;
       priceCents: number;
       valueCents: number;
+      costBasisCents: number;
+      gainLossCents: number;
     }>;
     netWorthCents: number;
   }>;
@@ -145,13 +147,45 @@ export const createTrading = (db: Database, prices: Prices): Trading => {
         .from(holdings)
         .where(eq(holdings.userId, userId))
         .all();
+      const buyRows = db
+        .select()
+        .from(trades)
+        .where(and(eq(trades.userId, userId), eq(trades.side, "buy")))
+        .orderBy(desc(trades.id))
+        .all();
+      const remainingBySymbol = new Map(
+        rows.map(({ symbol, quantity }) => [symbol, quantity]),
+      );
+      const costBasisBySymbol = new Map<string, number>();
+      // FIFO sales leave the newest purchase lots in the current position.
+      for (const trade of buyRows) {
+        const remaining = remainingBySymbol.get(trade.symbol) ?? 0;
+        if (remaining === 0) continue;
+        const quantity = Math.min(remaining, trade.quantity);
+        const cost = checkedMoney(trade.priceCents * quantity);
+        costBasisBySymbol.set(
+          trade.symbol,
+          checkedMoney((costBasisBySymbol.get(trade.symbol) ?? 0) + cost),
+        );
+        remainingBySymbol.set(trade.symbol, remaining - quantity);
+      }
+      const incompleteSymbol = rows.find(
+        ({ symbol }) => (remainingBySymbol.get(symbol) ?? 0) !== 0,
+      )?.symbol;
+      if (incompleteSymbol) {
+        throw new Error(`Missing purchase history for ${incompleteSymbol}`);
+      }
       const positions = await mapConcurrent(rows, 5, async (holding) => {
         const quote = await quoteUsd(holding.symbol);
+        const valueCents = checkedMoney(quote.priceCents * holding.quantity);
+        const costBasisCents = costBasisBySymbol.get(holding.symbol) ?? 0;
         return {
           symbol: holding.symbol,
           quantity: holding.quantity,
           priceCents: quote.priceCents,
-          valueCents: checkedMoney(quote.priceCents * holding.quantity),
+          valueCents,
+          costBasisCents,
+          gainLossCents: checkedMoney(valueCents - costBasisCents),
         };
       });
       const holdingsValue = positions.reduce(

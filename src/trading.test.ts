@@ -77,6 +77,41 @@ test("domain validation leaves portfolio state unchanged", async () => {
   }
 });
 
+test("portfolio reports FIFO cost basis and unrealized return", async () => {
+  const database = openDatabase(":memory:");
+  let priceCents = 10_000;
+  const changingPrices: Prices = {
+    quote: async (symbol) => ({
+      symbol: symbol.trim().toUpperCase(),
+      priceCents,
+      currency: "USD",
+    }),
+  };
+  try {
+    const trading = createTrading(database.db, changingPrices);
+    await trading.buy("alice", "AAPL", 2);
+    priceCents = 15_000;
+    await trading.buy("alice", "AAPL", 1);
+    await trading.sell("alice", "AAPL", 1);
+    priceCents = 12_000;
+
+    const portfolio = await trading.portfolio("alice");
+
+    assert.deepEqual(portfolio.positions, [
+      {
+        symbol: "AAPL",
+        quantity: 2,
+        priceCents: 12_000,
+        valueCents: 24_000,
+        costBasisCents: 25_000,
+        gainLossCents: -1_000,
+      },
+    ]);
+  } finally {
+    database.close();
+  }
+});
+
 test("a failed trade insert rolls back the entire buy", async () => {
   const database = openDatabase(":memory:");
   try {

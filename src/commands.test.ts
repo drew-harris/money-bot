@@ -15,6 +15,7 @@ test("exports the complete slash command payload", () => {
       "liquidate",
       "baltop",
       "pay",
+      "positions",
       "price",
       "stockinfo",
     ],
