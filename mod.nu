@@ -1,4 +1,4 @@
-export def profiles [] {
+def profiles [] {
   fnox profile --complete | lines
 }
 
